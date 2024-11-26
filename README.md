@@ -1,6 +1,5 @@
-## TFLOP
-TFLOP: Table Structure Recognition Framework with Layout Pointer Mechanism
+## TFLOP Implementation Project
 
-    This is my implementation of the TFLOP paper.
+My implementation of the TFLOP paper for converting table images into machine-readable format.
 
-![paper](https://www.ijcai.org/proceedings/2024/0105.pdf)
+[TFLOP: Table Structure Recognition Framework with Layout Pointer Mechanism](https://www.ijcai.org/proceedings/2024/0105.pdf)
