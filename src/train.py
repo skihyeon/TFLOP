@@ -24,7 +24,7 @@ def main():
         exp_dir = Path(train_config.checkpoint_dir) / (timestamp + "_" + train_config.exp_name)
         exp_dir.mkdir(parents=True, exist_ok=True)
     
-    model = TFLOPLightningModule(model_config=model_config, train_config=train_config)
+    model = TFLOPLightningModule(model_config=model_config, train_config=train_config, inference_mode=False)
     
     datamodule = TableDataModule(
         data_dir=train_config.data_dir,

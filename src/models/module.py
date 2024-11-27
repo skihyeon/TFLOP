@@ -7,14 +7,15 @@ from metrics.teds import compute_teds, compute_teds_struct
 from utils.util import construct_table_html
 
 class TFLOPLightningModule(pl.LightningModule):
-    def __init__(self, model_config: Any, train_config: Any):
+    def __init__(self, model_config: Any, train_config: Any, inference_mode: bool = False):
         super().__init__()
         self.save_hyperparameters()
         self.model_config = model_config
         self.train_config = train_config
+        self.inference_mode = inference_mode
         
         # Model components
-        self.model = TFLOP(model_config)
+        self.model = TFLOP(model_config, inference_mode)
         self.criterion = TFLOPLoss(
             temperature=model_config.temperature,
             lambda_cls=model_config.lambda_cls,

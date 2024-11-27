@@ -16,22 +16,44 @@ class TFLOP(nn.Module):
     논문 Section 3.1 Overall Architecture 참조:
     - 4개의 주요 모듈: image encoder, layout encoder, logical structure decoder, layout pointer
     """
-    def __init__(self, config: Any) -> None:
+    def __init__(self, config: Any, inference_mode: bool = False) -> None:
         super().__init__()
         
         self.config = config
         
-        # Tokenizer 초기화 (논문 3.4: OTSL tags)
+        # Tokenizer 초기화
         self.tokenizer = OTSLTokenizer(
             vocab_size=config.vocab_size,
             max_length=config.max_seq_length
         )
         
-        # 1. Image Encoder - Swin Transformer (논문 3.2)
-        self.image_encoder = SwinModel.from_pretrained(
-            config.swin_model_name,
-            image_size=config.image_size
-        )
+        if not inference_mode:
+            # 학습 모드: pretrained 모델 로드
+            self.image_encoder = SwinModel.from_pretrained(config.swin_model_name)
+            
+            # BART 설정 및 초기화
+            bart_config = BartConfig(
+                vocab_size=config.vocab_size,
+                max_position_embeddings=config.max_seq_length + 2,
+                d_model=config.feature_dim,
+                encoder_layers=config.encoder_layers,
+                decoder_layers=config.decoder_layers,
+                encoder_attention_heads=config.encoder_attention_heads,
+                decoder_attention_heads=config.decoder_attention_heads,
+                pad_token_id=self.tokenizer.pad_token_id,
+                bos_token_id=self.tokenizer.bos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                is_encoder_decoder=True,
+                decoder_start_token_id=self.tokenizer.bos_token_id,
+                forced_eos_token_id=self.tokenizer.eos_token_id,
+                scale_embedding=True,
+                use_cache=True,
+            )
+            self.structure_decoder = BartForConditionalGeneration(bart_config)
+        else:
+            # 추론 모드: 빈 모델 생성 (가중치는 나중에 로드됨)
+            self.image_encoder = SwinModel(self.image_encoder.config)
+            self.structure_decoder = BartForConditionalGeneration(self.structure_decoder.config)
         
         # Visual feature projection
         self.visual_proj = nn.Linear(
@@ -39,38 +61,21 @@ class TFLOP(nn.Module):
             config.feature_dim
         )
         
-        # 2. Layout Encoder (논문 3.3)
+        # Layout Encoder
         self.layout_encoder = LayoutEncoder(
             feature_dim=config.feature_dim,
             dropout=config.dropout
         )
         
-        # 3. BART Decoder (논문 3.4)
-        bart_config = BartConfig(
-            vocab_size=config.vocab_size,
-            max_position_embeddings=config.max_seq_length + 2,
-            d_model=config.feature_dim,
-            encoder_layers=config.encoder_layers,
-            decoder_layers=config.decoder_layers,
-            encoder_attention_heads=config.encoder_attention_heads,
-            decoder_attention_heads=config.decoder_attention_heads,
-            pad_token_id=self.tokenizer.pad_token_id,
-            bos_token_id=self.tokenizer.bos_token_id,
-            eos_token_id=self.tokenizer.eos_token_id,
-            is_encoder_decoder=True,
-            decoder_start_token_id=self.tokenizer.bos_token_id,
-            forced_eos_token_id=self.tokenizer.eos_token_id,
-            scale_embedding=True,
-            use_cache=True,
-        )
-        self.structure_decoder = BartForConditionalGeneration(bart_config)
-        
-        # 4. Layout Pointer (논문 3.5)
+        # Layout Pointer
         self.layout_pointer = LayoutPointer(
             feature_dim=config.feature_dim,
             temperature=config.temperature,
             tokenizer=self.tokenizer
         )
+        
+        # Span projection
+        self.span_proj = nn.Linear(config.feature_dim, config.feature_dim)
         
         # Span-aware contrastive projection layer 추가
         self.span_proj = nn.Linear(config.feature_dim, config.feature_dim)

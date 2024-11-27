@@ -39,6 +39,7 @@ class ModelConfig:
 class TrainingConfig:
     """학습 설정"""
     exp_name: str = "TFLOP"
+    use_wandb: bool = True
     
     # Resume training
     resume_training: bool = False
@@ -67,8 +68,6 @@ class TrainingConfig:
     # Device
     gpu_id: int = 2
     device: torch.device = torch.device(f'cuda:{gpu_id}' if torch.cuda.is_available() else 'cpu')
-    
-    use_wandb: bool = False
     
     # 새로운 설정 추가
     num_workers: int = 4
