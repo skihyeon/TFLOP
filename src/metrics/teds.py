@@ -137,8 +137,7 @@ def compute_teds(pred_html: str, true_html: str) -> Optional[float]:
         
         # 값이 예상 범위를 벗어나면 None 반환
         if not (0.0 <= teds <= 1.0):
-            print(f"Warning: TEDS value {teds} is out of expected range [0,1]")
-            return None
+            return 0.0
             
         return teds
         
