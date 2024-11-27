@@ -40,6 +40,10 @@ class TrainingConfig:
     """학습 설정"""
     exp_name: str = "TFLOP"
     
+    # Resume training
+    resume_training: bool = False
+    resume_checkpoint_path: Optional[str] = None  # 재개할 체크포인트 경로
+    
     # Data
     data_dir: str = "./data/pubtabnet"
     train_split: str = "train"
@@ -74,6 +78,11 @@ class TrainingConfig:
     
     # Logging
     log_every_n_steps: int = 100
+    
+    
+    # resume training
+    resume_training: bool = False
+    resume_checkpoint_path: str = "src/checkpoints/20241127_1741_TFLOP/checkpoints/TFLOP_step=1000.ckpt" # ex
     
     def to_dict(self):
         return {k: str(v) if isinstance(v, Path) else v 
