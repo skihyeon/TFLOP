@@ -32,6 +32,8 @@ def visualize_validation_sample(
         
         H, W = image.shape[1:]
         
+        
+        
         # 1-1. GT 박스 시각화 (왼쪽)
         ax1 = plt.subplot(1, 2, 1)
         ax1.imshow(img)
@@ -60,14 +62,12 @@ def visualize_validation_sample(
         ax2.imshow(img)
         ax2.set_title('Predicted Box-Tag Matching')
         
-        # 1-2. Pred 박스 시각화 (오른쪽)
-        ax2 = plt.subplot(1, 2, 2)
-        ax2.imshow(img)
-        ax2.set_title('Predicted Box-Tag Matching')
-        
         if pointer_logits is not None:
-            max_indices = pointer_logits.argmax(dim=-1)
-            max_values = pointer_logits.max(dim=-1)[0]
+            # [batch_size, num_boxes, num_tokens] -> [num_boxes, num_tokens]
+            pointer_logits = pointer_logits[0]  # 첫 번째 배치만 사용
+            
+            max_indices = pointer_logits.argmax(dim=-1)  # [num_boxes]
+            max_values = pointer_logits.max(dim=-1)[0]   # [num_boxes]
             
             # HTML 태그 파싱
             pred_html_tokens = pred_html.split()
@@ -76,7 +76,7 @@ def visualize_validation_sample(
             cmap = plt.cm.get_cmap('YlOrRd')
             
             for i, box in enumerate(boxes):
-                if max_indices[i] > 0:  # 0은 패딩
+                if max_indices[i].item() > 0:  # 0은 패딩
                     x1, y1, x2, y2 = box.cpu().numpy()
                     confidence = torch.sigmoid(max_values[i]).item()
                     
@@ -105,13 +105,12 @@ def visualize_validation_sample(
                             color='black', fontsize=8, 
                             bbox=dict(facecolor='white', alpha=0.7))
         
-        # 2. Loss components와 OTSL/HTML 정보를 하단에 표시
-        plt.figtext(0.1, 0.02, 
-                    f"Loss: {loss_components['loss']:.4f} | "
-                    f"CLS: {loss_components['cls']:.4f} | "
-                    f"PTR: {loss_components['ptr']:.4f} | "
-                    f"Empty PTR: {loss_components['empty_ptr']:.4f}",
-                    fontsize=10)
+        # Loss components 출력 부분 수정
+        loss_str = " | ".join([
+            f"{k.replace('_', ' ').title()}: {v:.4f}"
+            for k, v in loss_components.items()
+        ])
+        plt.figtext(0.1, 0.02, loss_str, fontsize=10)
         
         plt.figtext(0.1, -0.08,
                     f"Pred OTSL: {pred_otsl[:100]}...\n"

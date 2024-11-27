@@ -7,3 +7,7 @@ debugs
 wandb
 *.log
 *.json
+src/lightning_logs
+src/wandb
+src/debugs
+*.html
