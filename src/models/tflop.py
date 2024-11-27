@@ -6,7 +6,6 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import shift_tokens_right
 from .layout_encoder import LayoutEncoder
 from .layout_pointer import LayoutPointer
-from .watermark_filter import WatermarkFilter
 from .otsl_tokenizer import OTSLTokenizer
 import torch.nn.functional as F
 
@@ -51,10 +50,10 @@ class TFLOP(nn.Module):
             vocab_size=config.vocab_size,
             max_position_embeddings=config.max_seq_length + 2,
             d_model=config.feature_dim,
-            encoder_layers=6,
-            decoder_layers=6,
-            encoder_attention_heads=8,
-            decoder_attention_heads=8,
+            encoder_layers=config.encoder_layers,
+            decoder_layers=config.decoder_layers,
+            encoder_attention_heads=config.encoder_attention_heads,
+            decoder_attention_heads=config.decoder_attention_heads,
             pad_token_id=self.tokenizer.pad_token_id,
             bos_token_id=self.tokenizer.bos_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
@@ -72,6 +71,10 @@ class TFLOP(nn.Module):
             temperature=config.temperature,
             tokenizer=self.tokenizer
         )
+        
+        # Span-aware contrastive projection layer 추가
+        self.span_proj = nn.Linear(config.feature_dim, config.feature_dim)
+        self.temperature = config.temperature
 
     def forward(
         self,
@@ -184,5 +187,30 @@ class TFLOP(nn.Module):
             'empty_logits': empty_logits,           # (B, T)
             'data_tag_mask': data_tag_mask          # (B, T)
         }
+        
+        # Span-aware contrastive features 계산
+        if row_spans is not None and col_spans is not None:
+            box_features = layout_embedding  # (B, N, D)
+            projected_features = self.span_proj(box_features)  # (B, N, D)
+            
+            # Row-wise contrastive features
+            row_overlap = torch.matmul(row_spans, row_spans.transpose(-2, -1))  # (B, N, N)
+            row_span_coef = row_overlap / (
+                torch.sum(row_spans, dim=-1, keepdim=True) * 
+                torch.sum(row_spans, dim=-1, keepdim=True).transpose(-2, -1)
+            )  # Equation (6)
+            
+            # Column-wise contrastive features
+            col_overlap = torch.matmul(col_spans, col_spans.transpose(-2, -1))  # (B, N, N)
+            col_span_coef = col_overlap / (
+                torch.sum(col_spans, dim=-1, keepdim=True) * 
+                torch.sum(col_spans, dim=-1, keepdim=True).transpose(-2, -1)
+            )  # Equation (6)
+            
+            outputs.update({
+                'projected_features': projected_features,  # (B, N, D)
+                'row_span_coef': row_span_coef,          # (B, N, N)
+                'col_span_coef': col_span_coef           # (B, N, N)
+            })
         
         return outputs

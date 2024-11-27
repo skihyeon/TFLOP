@@ -3,3 +3,7 @@ checkpoints
 data
 debugs
 *.txt
+*.yaml
+wandb
+*.log
+*.json

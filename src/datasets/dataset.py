@@ -10,10 +10,10 @@ import numpy as np
 import jsonlines
 
 
-DEBUG = True  # 실제 학습 시에는 False로 변경 필요
+DEBUG =  True # 실제 학습 시에는 False로 변경 필요
 DEBUG_SAMPLE_SIZE = {
-            'train': 1000,  # 학습용 샘플 수
-            'val': 50     # 검증용 샘플 수
+            'train': 100,  # 학습용 샘플 수
+            'val': 10    # 검증용 샘플 수
         }  # 디버깅용 샘플 수
 class TableDataset(Dataset):
     """
@@ -65,7 +65,7 @@ class TableDataset(Dataset):
     # PubTabNet 2.0.0 데이터셋 로드
     def _load_annotations(self):
         """주석 파일 로드 및 검증"""
-        jsonl_file = os.path.join(self.data_dir, 'PubTabNet_2.0.0.jsonl')
+        jsonl_file = os.path.join(self.data_dir, f'{self.split}.jsonl')
         self.annotations = {}
         self.image_ids = []
         

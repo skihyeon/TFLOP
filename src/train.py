@@ -1,61 +1,53 @@
-import os
+from pathlib import Path
 import sys
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import os
+# Add project root to path
+sys.path.append(str(Path(__file__).parent))
 
-from typing import Optional
-import torch
-from config import TrainingConfig, TFLOPConfig
+from config import TrainingConfig, TFLOPConfig 
 from trainer import TFLOPTrainer
 from datasets import TableDataset, create_dataloader
+from utils import init_wandb
+
+def create_dataset(config: TrainingConfig, model_config: TFLOPConfig, split: str) -> TableDataset:
+    """데이터셋 생성 함수"""
+    return TableDataset(
+        data_dir=config.data_dir,
+        split=split,
+        max_seq_length=model_config.max_seq_length,
+        image_size=model_config.image_size,
+    )
+
 
 def main() -> None:
-    # 설정 로드
+    # 설정 초기화
     model_config = TFLOPConfig()
     train_config = TrainingConfig()
     
-    # 데이터셋 생성 (논문 Section 4.1)
-    train_dataset = TableDataset(
-        data_dir=train_config.data_dir,
-        split=train_config.train_split,
-        max_seq_length=model_config.max_seq_length,
-        image_size=model_config.image_size,
-    )
+    # 데이터셋 생성
+    train_dataset = create_dataset(train_config, model_config, train_config.train_split)
+    val_dataset = create_dataset(train_config, model_config, train_config.val_split)
     
-    val_dataset = TableDataset(
-        data_dir=train_config.data_dir,
-        split=train_config.val_split,
-        max_seq_length=model_config.max_seq_length,
-        image_size=model_config.image_size,
-    )
+    # 데이터로더 생성 (balanced dataloader 사용)
+    dataloader_kwargs = dict(batch_size=train_config.batch_size, num_workers=4)
+    train_dataloader = create_dataloader(train_dataset, shuffle=True, **dataloader_kwargs)
+    val_dataloader = create_dataloader(val_dataset, shuffle=False, **dataloader_kwargs)
     
-    # steps_per_epoch 계산
-    train_config.steps_per_epoch = len(train_dataset) // (
-        train_config.batch_size * train_config.gradient_accumulation_steps
-    )
+    # 학습 실행
+    trainer = TFLOPTrainer(model_config=model_config, train_config=train_config)
     
-    # 데이터로더 생성
-    train_dataloader = create_dataloader(
-        train_dataset,
-        batch_size=train_config.batch_size,
-        shuffle=True,
-        num_workers=4
-    )
+    # wandb 초기화
+    if train_config.use_wandb:
+        init_wandb(model_config, train_config)
     
-    val_dataloader = create_dataloader(
-        val_dataset,
-        batch_size=train_config.batch_size,
-        shuffle=False,
-        num_workers=4
-    )
-    
-    # 트레이너 초기화
-    trainer = TFLOPTrainer(
-        model_config=model_config,
-        train_config=train_config
-    )
-    
-    # 학습 시작
     trainer.train(train_dataloader, val_dataloader)
 
+
 if __name__ == '__main__':
-    main() 
+    os.environ['WANDB_API_KEY'] = "0a7cca3a906f5c34a06fe63623461725e2278ef3"
+    os.environ['WANDB_ENTITY'] = "hero981001"
+    main()
+    
+    
+    
+    
