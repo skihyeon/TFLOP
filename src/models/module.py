@@ -4,6 +4,7 @@ from typing import Dict, Any
 from .tflop import TFLOP
 from .losses import TFLOPLoss
 from metrics.teds import compute_teds, compute_teds_struct
+from utils.util import construct_table_html
 
 class TFLOPLightningModule(pl.LightningModule):
     def __init__(self, model_config: Any, train_config: Any):
@@ -61,7 +62,7 @@ class TFLOPLightningModule(pl.LightningModule):
         
         return loss_dict
     
-    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
+    def validation_step(self, batch, batch_idx):
         outputs = self(batch)
         batch_size = batch['images'].size(0)
         
@@ -76,48 +77,115 @@ class TFLOPLightningModule(pl.LightningModule):
             row_spans=batch['row_spans'],
             col_spans=batch['col_spans']
         )
+        
+        # 1. Loss 로깅 - 메트릭 이름에서 _step 제거
+        for name, value in loss_dict.items():
+            metric_name = f"val/{name}"
+            self.log(metric_name, value, 
+                    batch_size=batch_size,
+                    on_step=True,  # step 단위 로깅 활성화
+                    on_epoch=True,  # epoch 단위 로깅도 활성화
+                    prog_bar=False,
+                    sync_dist=True)
             
-        # TEDS 계산
-        pred_tokens = outputs['tag_logits'].argmax(dim=-1)
-        pred_otsl = self.model.tokenizer.decode(pred_tokens[0].cpu().tolist())
-        true_otsl = self.model.tokenizer.decode(batch['tokens'][0].cpu().tolist())
+            # progress bar용 별도 로깅 (step 단위, _step 없이)
+            if name == 'loss':
+                self.log('val_loss', value,  # progress bar용
+                        batch_size=batch_size,
+                        on_step=True,
+                        on_epoch=False,
+                        prog_bar=True,
+                        sync_dist=True)
         
+        # 2. TEDS 메트릭 계산 및 로깅
         try:
-            pred_html = self.model.tokenizer.convert_otsl_to_html(pred_otsl)
-        except ValueError:
-            pred_html = "<table><tr><td></td></tr></table>"
-
-        true_html = self.model.tokenizer.convert_otsl_to_html(true_otsl)
-        
-        teds = compute_teds(pred_html, true_html)
-        teds_struct = compute_teds_struct(pred_html, true_html)
-        
-        # Visualization용 데이터 추가
-        if batch_idx == 0:
+            pred_otsl = self.model.tokenizer.decode(
+                outputs['tag_logits'][0].argmax(dim=-1).cpu().tolist()
+            )
+            true_otsl = self.model.tokenizer.decode(
+                batch['tokens'][0].cpu().tolist()
+            )
+            
+            # text regions 정보 준비 (첫 번째 샘플의 cells 정보)
+            text_regions = batch['cells'][0]
+            
+            try:
+                # 예측 HTML 생성
+                pred_html = construct_table_html(
+                    pred_otsl,
+                    text_regions,
+                    outputs['pointer_logits'][0]
+                )
+                
+                # Ground Truth HTML 생성 (text 정보 포함)
+                true_html = construct_table_html(
+                    true_otsl,
+                    text_regions,
+                    None  # pointer_logits는 필요 없음 (GT는 이미 정렬되어 있음)
+                )
+            except ValueError as e:
+                print(f"Warning: Failed to construct HTML: {str(e)}")
+                pred_html = "<table><tr><td>Invalid OTSL sequence</td></tr></table>"
+                true_html = "<table><tr><td>Invalid OTSL sequence</td></tr></table>"
+            
+            # TEDS 및 TEDS-Structure 계산
+            teds = compute_teds(pred_html, true_html)
+            teds_struct = compute_teds_struct(pred_html, true_html)
+            
+            # TEDS 메트릭 로깅 - _step 없이 로깅
+            self.log('val_teds', teds,  # _step 없는 이름으로 로깅
+                     batch_size=batch_size,
+                     on_step=True,
+                     on_epoch=False,
+                     prog_bar=True)
+            self.log('val_teds_s', teds_struct,  # _step 없는 이름으로 로깅
+                     batch_size=batch_size,
+                     on_step=True,
+                     on_epoch=False,
+                     prog_bar=True)
+            
+            # epoch 단위 메트릭은 별도로 로깅
+            self.log('val/teds', teds,
+                     batch_size=batch_size,
+                     on_step=False,
+                     on_epoch=True,
+                     prog_bar=False)
+            self.log('val/teds_s', teds_struct,
+                     batch_size=batch_size,
+                     on_step=False,
+                     on_epoch=True,
+                     prog_bar=False)
+            
+            # 3. 첫 번째 배치의 첫 번째 샘플에 대해서만 시각화 데이터 준비
+            if batch_idx == 0:
+                # 시각화용 출력 준비
+                outputs.update({
+                    'pred_otsl': pred_otsl,
+                    'true_otsl': true_otsl,
+                    'pred_html': pred_html,
+                    'true_html': true_html,
+                    'complete_html': pred_html,  # complete_html은 이제 pred_html과 동일
+                    'teds': teds,
+                    'teds_s': teds_struct
+                })
+                
+        except Exception as e:
+            print(f"Warning: Validation step failed: {str(e)}")
+            # 기본값으로 출력 구성
             outputs.update({
-                'pred_html': pred_html,
-                'true_html': true_html,
-                'pred_otsl': pred_otsl,
-                'true_otsl': true_otsl
+                'pred_otsl': "Invalid sequence",
+                'true_otsl': "Invalid sequence",
+                'pred_html': "<table><tr><td>Error</td></tr></table>",
+                'true_html': "<table><tr><td>Error</td></tr></table>",
+                'complete_html': "<table><tr><td>Error</td></tr></table>",
+                'teds': 0.0,
+                'teds_s': 0.0
             })
+            # 에러 시에도 동일한 형식으로 로깅
+            self.log('val_teds', 0.0, batch_size=batch_size, on_step=True, on_epoch=False, prog_bar=True)
+            self.log('val_teds_s', 0.0, batch_size=batch_size, on_step=True, on_epoch=False, prog_bar=True)
         
-        # 메트릭 로깅
-        metrics = {
-            'val/loss': loss_dict['loss'],
-            'val/teds': teds,
-            'val/teds_struct': teds_struct
-        }
-        
-        self.log_dict(
-            metrics, 
-            batch_size=batch_size,
-            on_step=True,   # step 레벨 메트릭 활성화
-            on_epoch=False, # epoch 레벨 메트릭 비활성화
-            prog_bar=True,
-            sync_dist=True
-        )
-        
-        return {**outputs, **metrics}
+        return outputs
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(

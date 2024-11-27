@@ -61,7 +61,7 @@ class TableDataModule(pl.LightningDataModule):
         return DataLoader(
             self.val_dataset,
             batch_size=self.batch_size,
-            shuffle=False,
+            shuffle=True,
             num_workers=self.num_workers,
             pin_memory=self.pin_memory,
             collate_fn=collate_fn

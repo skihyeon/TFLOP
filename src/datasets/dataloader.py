@@ -15,6 +15,7 @@ def collate_fn(batch: List[Dict]) -> Dict[str, Union[torch.Tensor, List[str]]]:
     # Basic information
     images = torch.stack([item['image'] for item in batch])
     html = [item['html'] for item in batch]
+    cells = [item['cells'] for item in batch]
     
     # Get maximum sizes in batch
     max_boxes = max(item['bboxes'].size(0) for item in batch)
@@ -76,6 +77,7 @@ def collate_fn(batch: List[Dict]) -> Dict[str, Union[torch.Tensor, List[str]]]:
         'col_spans': torch.stack(batch_col_spans),       # (B, N, N)
         'tokens': torch.stack(batch_tokens),             # (B, L)
         'attention_mask': torch.stack(batch_attention_mask), # (B, L)
+        'cells': cells,                                  # List[List[Dict]] - cell 정보
         'html': html                                     # List[Dict] - 원본 HTML 구조
     }
 

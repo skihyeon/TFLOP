@@ -1,7 +1,7 @@
 import os
 import wandb
 from datetime import datetime
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Union, Optional
 import numpy as np
 import torch
 import json
@@ -240,6 +240,162 @@ def convert_html_to_otsl(ann: Dict) -> str:
     
     return otsl_sequence
 
+def construct_table_html(
+    otsl_sequence: str,
+    text_regions: List[Dict[str, Union[str, List[float]]]],
+    pointer_logits: Optional[torch.Tensor] = None,
+    confidence_threshold: float = 0.5  # 포인터 매칭 신뢰도 임계값
+) -> str:
+    """OTSL 시퀀스와 text region 정보를 결합하여 완전한 HTML 테이블 생성"""
+    try:
+        # 1. 입력 유효성 검사
+        if not text_regions or not isinstance(text_regions, list):
+            return f"<table><tr><td>Invalid text regions</td></tr></table>"
+            
+        # 1. OTSL 토큰을 파싱하여 그리드 구조 생성
+        tokens = otsl_sequence.split()
+        rows = []
+        current_row = []
+        
+        for token in tokens:
+            if token == 'NL':
+                if current_row:  # 빈 행 제외
+                    rows.append(current_row)
+                    current_row = []
+            else:
+                current_row.append(token)
+        if current_row:  # 마지막 행 처리
+            rows.append(current_row)
+        
+        # 2. 그리드 구조 검증
+        if not rows:
+            raise ValueError("Invalid OTSL sequence: No valid rows found")
+        num_cols = len(rows[0])
+        if not all(len(row) == num_cols for row in rows):
+            raise ValueError("Invalid OTSL sequence: Inconsistent row lengths")
+        
+        # 3. span 정보 추적을 위한 그리드 생성
+        num_rows = len(rows)
+        cell_grid = [[None] * num_cols for _ in range(num_rows)]
+        data_tag_positions = []  # (row, col, html_pos) 튜플 저장
+        
+        # 4. HTML 생성 및 span 정보 추적
+        html = ["<table>"]
+        html_pos = 1  # <table> 다음부터 시작
+        
+        for i, row in enumerate(rows):
+            html.append("<tr>")
+            html_pos += 1
+            
+            j = 0
+            while j < len(row):
+                if cell_grid[i][j] is not None:
+                    j += 1
+                    continue
+                    
+                token = row[j]
+                colspan = 1
+                rowspan = 1
+                
+                # Span 정보 계산
+                if token == 'L' or token == 'X':
+                    colspan = 2
+                if token == 'U' or token == 'X':
+                    rowspan = 2
+                
+                # Cell 태그 생성
+                cell_tag = "<td"
+                if colspan > 1:
+                    cell_tag += f' colspan="{colspan}"'
+                if rowspan > 1:
+                    cell_tag += f' rowspan="{rowspan}"'
+                cell_tag += "></td>"
+                
+                # Span 정보 그리드에 표시
+                for ri in range(i, min(i + rowspan, num_rows)):
+                    for ci in range(j, min(j + colspan, num_cols)):
+                        cell_grid[ri][ci] = (i, j)  # 원본 셀 위치 저장
+                
+                # 데이터 셀('C') 위치 저장
+                if token == 'C':
+                    data_tag_positions.append((i, j, html_pos))
+                
+                html.append(cell_tag)
+                html_pos += 1
+                j += colspan
+            
+            html.append("</tr>")
+            html_pos += 1
+        
+        html.append("</table>")
+        
+        # 5. text region 매핑
+        if pointer_logits is not None:
+            # 기존 pointer logits 처리 코드
+            try:
+                pointer_probs = torch.softmax(pointer_logits, dim=-1)
+                box_to_cell = {}
+                for box_idx in range(min(pointer_logits.size(0), len(text_regions))):
+                    probs = pointer_probs[box_idx]
+                    max_prob, cell_idx = probs.max(dim=0)
+                    
+                    if (max_prob.item() >= confidence_threshold and 
+                        cell_idx < len(data_tag_positions)):
+                        row, col, html_pos = data_tag_positions[cell_idx]
+                        if html_pos not in box_to_cell:
+                            box_to_cell[html_pos] = []
+                        box_to_cell[html_pos].append({
+                            'box_idx': box_idx,
+                            'confidence': max_prob.item()
+                        })
+            except Exception as e:
+                print(f"Warning: Failed to process pointer logits: {str(e)}")
+                box_to_cell = {}
+        else:
+            # GT의 경우: text regions를 순서대로 data cell positions에 매핑
+            box_to_cell = {}
+            for box_idx, (row, col, html_pos) in enumerate(data_tag_positions):
+                if box_idx < len(text_regions):
+                    if html_pos not in box_to_cell:
+                        box_to_cell[html_pos] = []
+                    box_to_cell[html_pos].append({
+                        'box_idx': box_idx,
+                        'confidence': 1.0
+                    })
+        
+        # HTML에 text 삽입
+        html_with_text = []
+        for i, tag in enumerate(html):
+            if i in box_to_cell:
+                try:
+                    # 해당 셀에 매핑된 모든 text region의 텍스트 결합
+                    cell_texts = []
+                    for box in box_to_cell[i]:
+                        if (box['box_idx'] < len(text_regions) and
+                            'text' in text_regions[box['box_idx']]):
+                            text = text_regions[box['box_idx']]['text'].strip()
+                            if text:  # 빈 텍스트 제외
+                                cell_texts.append(text)
+                    
+                    cell_text = ' '.join(cell_texts) if cell_texts else ''
+                    
+                    # </td> 직전에 텍스트 삽입
+                    if '</td>' in tag:
+                        tag_parts = tag.split('</td>')
+                        html_with_text.append(f"{tag_parts[0]}{cell_text}</td>")
+                    else:
+                        html_with_text.append(tag)
+                except Exception as e:
+                    html_with_text.append(tag)
+            else:
+                html_with_text.append(tag)
+        
+        return '\n'.join(html_with_text)
+        
+    except Exception as e:
+        return f"<table><tr><td>Error: {str(e)}</td></tr></table>"
+    
+    return '\n'.join(html)
 
 class CustomJSONEncoder(json.JSONEncoder):
     """텐서와 넘파이 배열을 JSON으로 직렬화하기 위한 인코더"""

@@ -12,7 +12,7 @@ from utils.util import extract_spans_from_html, convert_html_to_otsl
 
 
 
-DEBUG =  True # 실제 학습 시에는 False로 변경 필요
+DEBUG =  False # 실제 학습 시에는 False로 변경 필요
 DEBUG_SAMPLE_SIZE = {
             'train': 100,  # 학습용 샘플 수
             'val': 10    # 검증용 샘플 수
@@ -123,9 +123,10 @@ class TableDataset(Dataset):
         # 3. HTML에서 span 정보 추출
         processed_cells, row_span_matrix, col_span_matrix = extract_spans_from_html(ann['html']['structure'])
         
-        # 4. annotation에서 직접 bbox 정보 추출 및 정규화
+        # 4. annotation에서 cell 정보 추출 및 정규화
+        cells = []
         bboxes = []
-        for cell in ann['html']['cells']:
+        for cell in ann['cells']:  # 'cells' 리스트에서 직접 접근
             if 'bbox' in cell:  # non-empty cells
                 x0, y0, x1, y1 = cell['bbox']
                 normalized_bbox = [
@@ -135,6 +136,10 @@ class TableDataset(Dataset):
                     y1 / image_height
                 ]
                 bboxes.append(normalized_bbox)
+                cells.append({
+                    'text': cell['text'],
+                    'bbox': normalized_bbox
+                })
         
         return {
             'image_id': image_id,
@@ -143,6 +148,7 @@ class TableDataset(Dataset):
             'bboxes': torch.tensor(bboxes, dtype=torch.float32),
             'row_spans': torch.tensor(row_span_matrix, dtype=torch.float32),
             'col_spans': torch.tensor(col_span_matrix, dtype=torch.float32),
+            'cells': cells,  # cell 정보 추가 (text와 bbox 포함)
             'html': ann['html'],  # 디버깅용
         }
 

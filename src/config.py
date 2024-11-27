@@ -38,6 +38,8 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """학습 설정"""
+    exp_name: str = "TFLOP"
+    
     # Data
     data_dir: str = "./data/pubtabnet"
     train_split: str = "train"
@@ -45,8 +47,8 @@ class TrainingConfig:
     
     # Training
     total_steps: int = 100000
-    eval_steps: int = 50
-    save_steps: int = 2000
+    eval_steps: int = 900
+    save_steps: int = 1000
     checkpoint_dir: str = "./checkpoints"
     
     batch_size: int = 6

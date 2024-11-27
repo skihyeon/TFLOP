@@ -16,8 +16,8 @@ def main():
     train_config = TrainingConfig()
     
     
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    exp_dir = Path(train_config.checkpoint_dir) / timestamp
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    exp_dir = Path(train_config.checkpoint_dir) / (timestamp + "_" + train_config.exp_name)
     exp_dir.mkdir(parents=True, exist_ok=True)
     
     model = TFLOPLightningModule(model_config=model_config, train_config=train_config)
@@ -31,13 +31,12 @@ def main():
     callbacks = [
         ModelCheckpoint(
             dirpath=exp_dir / "checkpoints",
-            filename='step_{step}-loss_{val/loss:.2f}',
+            filename=f'{train_config.exp_name}'+'_{step}',
             save_top_k=3,
             monitor='val/loss',
             mode='min',
-            every_n_train_steps=train_config.save_steps,
+            every_n_train_steps=train_config.save_steps if train_config.save_steps > 0 else None,
         ),
-        LearningRateMonitor(logging_interval='step'),
         ValidationVisualizationCallback(viz_dir=exp_dir / "visualizations")
     ]
     
@@ -50,8 +49,9 @@ def main():
                 "train_config": train_config.to_dict()
             }
         )
+        callbacks.append(LearningRateMonitor(logging_interval='step'))
     else:
-        logger = True
+        logger = False
     
     
     
@@ -75,7 +75,7 @@ def main():
         enable_checkpointing=True,
         callbacks=callbacks,
         logger=logger,
-        log_every_n_steps=train_config.log_every_n_steps,
+        log_every_n_steps=train_config.log_every_n_steps if logger else None,
         enable_progress_bar=True,
         enable_model_summary=True,
     )
@@ -83,4 +83,5 @@ def main():
     trainer.fit(model, datamodule=datamodule)
 
 if __name__ == '__main__':
+    torch.set_float32_matmul_precision('high')
     main()
