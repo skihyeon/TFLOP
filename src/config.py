@@ -9,11 +9,13 @@ class ModelConfig:
     vocab_size: int = 50265     # BART tokenizer의 전체 vocabulary 크기
     feature_dim: int = 768      # 모델의 hidden dimension 크기
     max_seq_length: int = 1376  # 최대 시퀀스(토큰) 길이
-    image_size: int = 384       # 입력 이미지의 크기 (height=width)
+    image_size: int = 384       # 입력 이미지의 크기 (height=width)  # 논문 768
     temperature: float = 0.1    # Layout Pointer의 softmax temperature
     
     # Swin Transformer 설정
-    swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
+    # swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
+    # swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
+    swin_model_name: str = "microsoft/swinv2-tiny-patch4-window16-256"
     
     # BART model 설정
     encoder_layers: int = 6
@@ -39,7 +41,7 @@ class ModelConfig:
 class TrainingConfig:
     """학습 설정"""
     exp_name: str = "TFLOP"
-    use_wandb: bool = True
+    use_wandb: bool = False
     
     # Resume training
     resume_training: bool = False
@@ -52,11 +54,11 @@ class TrainingConfig:
     
     # Training
     total_steps: int = 100000
-    eval_steps: int = 900
-    save_steps: int = 1000
+    eval_steps: int = 1900
+    save_steps: int = 2000
     checkpoint_dir: str = "./checkpoints"
     
-    batch_size: int = 6
+    batch_size: int = 8
     gradient_accumulation_steps: int = 1
     learning_rate: float = 1e-4
     # weight_decay: float = 0.05
@@ -76,12 +78,12 @@ class TrainingConfig:
     debug_samples: int = 100
     
     # Logging
-    log_every_n_steps: int = 100
+    log_every_n_steps: int = 10
     
     
     # resume training
     resume_training: bool = False
-    resume_checkpoint_path: str = "src/checkpoints/20241127_1741_TFLOP/checkpoints/TFLOP_step=1000.ckpt" # ex
+    resume_checkpoint_path: str = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241128_1827_TFLOP/checkpoints/TFLOP_step=10000.ckpt" # ex
     
     def to_dict(self):
         return {k: str(v) if isinstance(v, Path) else v 

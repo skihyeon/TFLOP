@@ -118,19 +118,19 @@ def visualize_validation_sample(
                             color='black', fontsize=8, 
                             bbox=dict(facecolor='white', alpha=0.7))
         
-        # Loss components 출력
-        loss_str = " | ".join([
-            f"{k.replace('_', ' ').title()}: {v:.4f}"
-            for k, v in loss_components.items()
-        ])
-        plt.figtext(0.1, 0.02, loss_str, fontsize=10)
+        # # Loss components 출력
+        # loss_str = " | ".join([
+        #     f"{k.replace('_', ' ').title()}: {v:.4f}"
+        #     for k, v in loss_components.items()
+        # ])
+        # plt.figtext(0.1, 0.02, loss_str, fontsize=10)
         
-        plt.figtext(0.1, -0.08,
-                    f"Pred OTSL: {pred_otsl[:100]}...\n"
-                    f"True OTSL: {true_otsl[:100]}...\n"
-                    f"Pred HTML: {pred_html[:100]}...\n"
-                    f"True HTML: {true_html[:100]}...",
-                    fontsize=8)
+        # plt.figtext(0.1, -0.08,
+        #             f"Pred OTSL: {pred_otsl[:100]}...\n"
+        #             f"True OTSL: {true_otsl[:100]}...\n"
+        #             f"Pred HTML: {pred_html[:100]}...\n"
+        #             f"True HTML: {true_html[:100]}...",
+        #             fontsize=8)
         
         plt.tight_layout()
         

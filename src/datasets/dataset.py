@@ -8,13 +8,13 @@ import torchvision.transforms as transforms
 from models.otsl_tokenizer import OTSLTokenizer
 from typing import Dict, Optional
 import jsonlines
-from utils.util import extract_spans_from_html, convert_html_to_otsl
+from utils.util import extract_spans_from_html, convert_html_to_otsl, extract_spans_from_otsl
 
 # 디버그 모드 설정
-DEBUG = False
+DEBUG = True
 DEBUG_SAMPLES = {
-    'train': 100,
-    'val': 50
+    'train': 10000,
+    'val': 100
 }
 
 class TableDataset(Dataset):
@@ -134,7 +134,8 @@ class TableDataset(Dataset):
             otsl_tokens = self.cached_otsl_tokens[image_name]
             
             # 3. HTML에서 span 정보 추출
-            _, row_span_matrix, col_span_matrix = extract_spans_from_html(ann['html']['structure'])
+            # _, row_span_matrix, col_span_matrix = extract_spans_from_html(ann['html']['structure'])
+            row_span_matrix, col_span_matrix = extract_spans_from_otsl(otsl_tokens)
             row_span_matrix = torch.tensor(row_span_matrix, dtype=torch.float32)
             col_span_matrix = torch.tensor(col_span_matrix, dtype=torch.float32)
             
@@ -164,11 +165,36 @@ class TableDataset(Dataset):
                         'bbox': normalized_bbox
                     })
             
+            # Box indices와 data tag mask 생성
+            box_indices = []
+            data_tag_positions = []
+
+            # 1. OTSL sequence에서 모든 'C' 태그 위치 찾기
+            for i, token_id in enumerate(otsl_tokens):
+                token = self.tokenizer.id2token[token_id]
+                if token == 'C':  # OTSL의 data cell 태그
+                    data_tag_positions.append(i)
+            
+            # 2. Data tag mask 생성 - 모든 'C' 태그 위치 마스킹
+            data_tag_mask = torch.zeros(len(otsl_tokens), dtype=torch.bool)
+            for pos in data_tag_positions:
+                data_tag_mask[pos] = True
+            
+            # 3. Box indices 생성 - bbox가 있는 cell만 매핑
+            bbox_idx = 0  # bbox의 인덱스
+            for cell in ann['html']['cells']:
+                if 'bbox' in cell:  # non-empty cell
+                    # 현재 bbox를 현재 위치의 'C' 태그와 매핑
+                    box_indices.append(data_tag_positions[bbox_idx])
+                    bbox_idx += 1
+
             return {
                 'image_name': image_name,
                 'image': image,
                 'tokens': torch.tensor(otsl_tokens, dtype=torch.long),
                 'bboxes': torch.tensor(bboxes, dtype=torch.float32),
+                'box_indices': torch.tensor(box_indices, dtype=torch.long),
+                'data_tag_mask': data_tag_mask,
                 'row_spans': row_span_matrix,
                 'col_spans': col_span_matrix,
                 'cells': cells,

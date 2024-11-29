@@ -1,13 +1,15 @@
-from typing import Dict, Optional, Union, Any
+from typing import Dict, Optional, Union, Any, Tuple
 import torch
 import torch.nn as nn
 from transformers import SwinModel, BartForConditionalGeneration, BartConfig
+from transformers import Swinv2Model
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import shift_tokens_right
 from .layout_encoder import LayoutEncoder
 from .layout_pointer import LayoutPointer
 from .otsl_tokenizer import OTSLTokenizer
 import torch.nn.functional as F
+from utils.util import compute_span_coefficients
 
 class TFLOP(nn.Module):
     """
@@ -29,8 +31,8 @@ class TFLOP(nn.Module):
         
         if not inference_mode:
             # 학습 모드: pretrained 모델 로드
-            self.image_encoder = SwinModel.from_pretrained(config.swin_model_name)
-            
+            # self.image_encoder = SwinModel.from_pretrained(config.swin_model_name)
+            self.image_encoder = Swinv2Model.from_pretrained(config.swin_model_name)
             # BART 설정 및 초기화
             bart_config = BartConfig(
                 vocab_size=config.vocab_size,
@@ -52,7 +54,8 @@ class TFLOP(nn.Module):
             self.structure_decoder = BartForConditionalGeneration(bart_config)
         else:
             # 추론 모드: 빈 모델 생성 (가중치는 나중에 로드됨)
-            self.image_encoder = SwinModel(self.image_encoder.config)
+            # self.image_encoder = SwinModel(self.image_encoder.config)
+            self.image_encoder = Swinv2Model(self.image_encoder.config)
             self.structure_decoder = BartForConditionalGeneration(self.structure_decoder.config)
         
         # Visual feature projection
@@ -76,21 +79,19 @@ class TFLOP(nn.Module):
         
         # Span projection
         self.span_proj = nn.Linear(config.feature_dim, config.feature_dim)
-        
-        # Span-aware contrastive projection layer 추가
-        self.span_proj = nn.Linear(config.feature_dim, config.feature_dim)
         self.temperature = config.temperature
 
-    def forward(
-        self,
-        images: torch.Tensor,           # (B, 3, H, W)
-        text_regions: torch.Tensor,     # (B, N, 4) - normalized bboxes
-        labels: Optional[torch.Tensor] = None,  # (B, L)
-        attention_mask: Optional[torch.Tensor] = None,  # (B, L)
-        row_spans: Optional[torch.Tensor] = None,  # (B, N, N)
-        col_spans: Optional[torch.Tensor] = None   # (B, N, N)
-    ) -> Dict[str, torch.Tensor]:
+    def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Forward pass"""
+        
+        images: torch.Tensor = batch['images']           # (B, 3, H, W)
+        text_regions: torch.Tensor = batch['bboxes']     # (B, N, 4) - normalized bboxes
+        labels: Optional[torch.Tensor] = batch['tokens']  # (B, L)
+        attention_mask: Optional[torch.Tensor] = batch['attention_mask']  # (B, L)
+        row_spans: Optional[torch.Tensor] = batch['row_spans']  # (B, N, N)
+        col_spans: Optional[torch.Tensor] = batch['col_spans']   # (B, N, N)
+        data_tag_mask: Optional[torch.Tensor] = batch['data_tag_mask']  # (B, T)
+        
         B = images.size(0)
         N = text_regions.size(1)
         
@@ -130,11 +131,7 @@ class TFLOP(nn.Module):
                 self.tokenizer.bos_token_id
             )
             
-            # attention mask도 같이 자르고 contiguous하게 만듦
-            if attention_mask is not None:
-                attention_mask = attention_mask[:, :self.config.max_seq_length].contiguous()
-            else:
-                attention_mask = torch.ones_like(labels, dtype=torch.long)
+            attention_mask = attention_mask[:, :self.config.max_seq_length].contiguous()
             
             decoder_outputs = self.structure_decoder(
                 encoder_outputs=encoder_outputs,
@@ -178,9 +175,10 @@ class TFLOP(nn.Module):
             last_hidden_state  # tag features (B, L, D)
         ], dim=1)
         
-        pointer_logits, empty_logits, data_tag_mask = self.layout_pointer(
+        pointer_logits, empty_logits = self.layout_pointer(
             decoder_hidden_states=last_hidden_state,
-            num_boxes=N
+            num_boxes=N,
+            data_tag_mask=data_tag_mask
         )
         
         # 5. Return outputs for loss calculation
@@ -196,26 +194,27 @@ class TFLOP(nn.Module):
         # Span-aware contrastive features 계산
         if row_spans is not None and col_spans is not None:
             box_features = layout_embedding  # (B, N, D)
-            projected_features = self.span_proj(box_features)  # (B, N, D)
             
             # Row-wise contrastive features
-            row_overlap = torch.matmul(row_spans, row_spans.transpose(-2, -1))  # (B, N, N)
-            row_span_coef = row_overlap / (
-                torch.sum(row_spans, dim=-1, keepdim=True) * 
-                torch.sum(row_spans, dim=-1, keepdim=True).transpose(-2, -1)
-            )  # Equation (6)
+            row_projected_features = self.span_proj(box_features)  # (B, N, D)
+            row_projected_features = F.normalize(row_projected_features, dim=-1)
+            row_sim_matrix = torch.matmul(row_projected_features, row_projected_features.transpose(-2, -1)) / self.temperature
             
             # Column-wise contrastive features
-            col_overlap = torch.matmul(col_spans, col_spans.transpose(-2, -1))  # (B, N, N)
-            col_span_coef = col_overlap / (
-                torch.sum(col_spans, dim=-1, keepdim=True) * 
-                torch.sum(col_spans, dim=-1, keepdim=True).transpose(-2, -1)
-            )  # Equation (6)
+            col_projected_features = self.span_proj(box_features)  # (B, N, D)
+            col_projected_features = F.normalize(col_projected_features, dim=-1)
+            col_sim_matrix = torch.matmul(col_projected_features, col_projected_features.transpose(-2, -1)) / self.temperature
             
+            # Row-wise span coefficients
+            row_span_coef, col_span_coef = compute_span_coefficients(
+                row_spans,
+                col_spans
+            )
             outputs.update({
-                'projected_features': projected_features,  # (B, N, D)
-                'row_span_coef': row_span_coef,          # (B, N, N)
-                'col_span_coef': col_span_coef           # (B, N, N)
+                'row_sim_matrix': row_sim_matrix,  # (B, N, N)
+                'col_sim_matrix': col_sim_matrix,  # (B, N, N) 
+                'row_span_coef': row_span_coef,    # (B, N, N)
+                'col_span_coef': col_span_coef     # (B, N, N)
             })
         
         return outputs

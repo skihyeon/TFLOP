@@ -17,7 +17,6 @@ class TFLOPLightningModule(pl.LightningModule):
         # Model components
         self.model = TFLOP(model_config, inference_mode)
         self.criterion = TFLOPLoss(
-            temperature=model_config.temperature,
             lambda_cls=model_config.lambda_cls,
             lambda_ptr=model_config.lambda_ptr,
             lambda_empty_ptr=model_config.lambda_empty_ptr,
@@ -33,25 +32,20 @@ class TFLOPLightningModule(pl.LightningModule):
             'labels': batch.get('tokens', None),
             'attention_mask': batch.get('attention_mask', None),
             'row_spans': batch.get('row_spans', None),
-            'col_spans': batch.get('col_spans', None)
+            'col_spans': batch.get('col_spans', None),
+            'data_tag_mask': batch.get('data_tag_mask', None),
+            'box_indices': batch.get('box_indices', None),
+            'cells': batch.get('cells', None),
+            'html': batch.get('html', None)
         }
-        return self.model(**model_inputs)
+        return self.model(batch)
         
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         outputs = self(batch)
         batch_size = batch['images'].size(0)
-        
-        loss_dict = self.criterion(
-            tag_logits=outputs['tag_logits'],
-            tag_targets=batch['tokens'],
-            box_features=outputs['box_features'],
-            tag_features=outputs['tag_features'],
-            box_indices=batch['tokens'],
-            data_tag_mask=outputs['data_tag_mask'],
-            empty_mask=(batch['tokens'] == self.model.tokenizer.pad_token_id),
-            row_spans=batch['row_spans'],
-            col_spans=batch['col_spans']
-        )
+        batch['empty_mask'] = (batch['tokens'] == self.model.tokenizer.pad_token_id)
+            
+        loss_dict = self.criterion(batch, outputs)
         
         # step 단위로만 로깅
         for name, value in loss_dict.items():
@@ -66,18 +60,9 @@ class TFLOPLightningModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         outputs = self(batch)
         batch_size = batch['images'].size(0)
-        
-        loss_dict = self.criterion(
-            tag_logits=outputs['tag_logits'],
-            tag_targets=batch['tokens'],
-            box_features=outputs['box_features'],
-            tag_features=outputs['tag_features'],
-            box_indices=batch['tokens'],
-            data_tag_mask=outputs['data_tag_mask'],
-            empty_mask=(batch['tokens'] == self.model.tokenizer.pad_token_id),
-            row_spans=batch['row_spans'],
-            col_spans=batch['col_spans']
-        )
+        batch['empty_mask'] = (batch['tokens'] == self.model.tokenizer.pad_token_id)
+            
+        loss_dict = self.criterion(batch, outputs)  
         
         # 1. Loss 로깅 - 메트릭 이름에서 _step 제거
         for name, value in loss_dict.items():
