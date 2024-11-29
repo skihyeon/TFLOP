@@ -26,8 +26,8 @@ def collate_fn(batch: List[Dict]) -> Dict[str, Union[torch.Tensor, List[str]]]:
     
     # Prepare tensors for batch
     batch_boxes = []      # box coordinates
-    batch_row_spans = []  # row span matrices
-    batch_col_spans = []  # column span matrices
+    batch_row_span_coef = []  # row span matrices
+    batch_col_span_coef = []  # column span matrices
     batch_tokens = []     # OTSL tokens
     batch_attention_mask = [] # attention mask for tokens
     batch_data_tag_masks = []  # data tag masks
@@ -43,19 +43,19 @@ def collate_fn(batch: List[Dict]) -> Dict[str, Union[torch.Tensor, List[str]]]:
         batch_boxes.append(padded_boxes)
         
         # 2. Span matrices - 실제 box 개수만큼만 패딩
-        row_spans = item['row_spans']  # (N, N)
-        col_spans = item['col_spans']  # (N, N)
+        row_span_coef = item['row_span_coef']  # (N, N)
+        col_span_coef = item['col_span_coef']  # (N, N)
         
         # max_boxes 크기로 한 번만 패딩
-        padded_row_spans = torch.zeros(max_boxes, max_boxes, device=row_spans.device)
-        padded_col_spans = torch.zeros(max_boxes, max_boxes, device=col_spans.device)
+        padded_row_span_coef = torch.zeros(max_boxes, max_boxes, device=row_span_coef.device)
+        padded_col_span_coef = torch.zeros(max_boxes, max_boxes, device=col_span_coef.device)
         
         # 실제 span 정보만 복사
-        padded_row_spans[:num_boxes, :num_boxes] = row_spans[:num_boxes, :num_boxes]
-        padded_col_spans[:num_boxes, :num_boxes] = col_spans[:num_boxes, :num_boxes]
+        padded_row_span_coef[:num_boxes, :num_boxes] = row_span_coef[:num_boxes, :num_boxes]
+        padded_col_span_coef[:num_boxes, :num_boxes] = col_span_coef[:num_boxes, :num_boxes]
         
-        batch_row_spans.append(padded_row_spans)
-        batch_col_spans.append(padded_col_spans)
+        batch_row_span_coef.append(padded_row_span_coef)
+        batch_col_span_coef.append(padded_col_span_coef)
         
         # 3. OTSL tokens
         padded_tokens = torch.full((max_seq_len,), 
@@ -79,8 +79,8 @@ def collate_fn(batch: List[Dict]) -> Dict[str, Union[torch.Tensor, List[str]]]:
     return {
         'images': images,                                # (B, 3, 768, 768)
         'bboxes': torch.stack(batch_boxes),              # (B, N, 4)
-        'row_spans': torch.stack(batch_row_spans),       # (B, N, N)
-        'col_spans': torch.stack(batch_col_spans),       # (B, N, N)
+        'row_span_coef': torch.stack(batch_row_span_coef),       # (B, N, N)
+        'col_span_coef': torch.stack(batch_col_span_coef),       # (B, N, N)
         'tokens': torch.stack(batch_tokens),             # (B, L)
         'attention_mask': torch.stack(batch_attention_mask), # (B, L)
         'data_tag_mask': torch.stack(batch_data_tag_masks), # (B, L)
