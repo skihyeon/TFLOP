@@ -88,8 +88,8 @@ class TFLOP(nn.Module):
         text_regions: torch.Tensor = batch['bboxes']     # (B, N, 4) - normalized bboxes
         labels: Optional[torch.Tensor] = batch['tokens']  # (B, L)
         attention_mask: Optional[torch.Tensor] = batch['attention_mask']  # (B, L)
-        row_spans: Optional[torch.Tensor] = batch['row_spans']  # (B, N, N)
-        col_spans: Optional[torch.Tensor] = batch['col_spans']   # (B, N, N)
+        row_span_coef: Optional[torch.Tensor] = batch['row_span_coef']  # (B, N, N)
+        col_span_coef: Optional[torch.Tensor] = batch['col_span_coef']   # (B, N, N)
         data_tag_mask: Optional[torch.Tensor] = batch['data_tag_mask']  # (B, T)
         
         B = images.size(0)
@@ -192,29 +192,24 @@ class TFLOP(nn.Module):
         }
         
         # Span-aware contrastive features 계산
-        if row_spans is not None and col_spans is not None:
-            box_features = layout_embedding  # (B, N, D)
-            
+        if row_span_coef is not None:
             # Row-wise contrastive features
-            row_projected_features = self.span_proj(box_features)  # (B, N, D)
+            row_projected_features = self.span_proj(layout_embedding)  # (B, N, D)
             row_projected_features = F.normalize(row_projected_features, dim=-1)
             row_sim_matrix = torch.matmul(row_projected_features, row_projected_features.transpose(-2, -1)) / self.temperature
-            
+
+            outputs.update({
+                'row_sim_matrix': row_sim_matrix,  # (B, N, N)
+            })
+        
+        if col_span_coef is not None:
             # Column-wise contrastive features
-            col_projected_features = self.span_proj(box_features)  # (B, N, D)
+            col_projected_features = self.span_proj(layout_embedding)  # (B, N, D)
             col_projected_features = F.normalize(col_projected_features, dim=-1)
             col_sim_matrix = torch.matmul(col_projected_features, col_projected_features.transpose(-2, -1)) / self.temperature
             
-            # Row-wise span coefficients
-            row_span_coef, col_span_coef = compute_span_coefficients(
-                row_spans,
-                col_spans
-            )
             outputs.update({
-                'row_sim_matrix': row_sim_matrix,  # (B, N, N)
-                'col_sim_matrix': col_sim_matrix,  # (B, N, N) 
-                'row_span_coef': row_span_coef,    # (B, N, N)
-                'col_span_coef': col_span_coef     # (B, N, N)
+                'col_sim_matrix': col_sim_matrix,  # (B, N, N)
             })
         
         return outputs

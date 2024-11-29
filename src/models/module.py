@@ -31,8 +31,8 @@ class TFLOPLightningModule(pl.LightningModule):
             'text_regions': batch['bboxes'],  # bboxes -> text_regions
             'labels': batch.get('tokens', None),
             'attention_mask': batch.get('attention_mask', None),
-            'row_spans': batch.get('row_spans', None),
-            'col_spans': batch.get('col_spans', None),
+            'row_span_coef': batch.get('row_span_coef', None),
+            'col_span_coef': batch.get('col_span_coef', None),
             'data_tag_mask': batch.get('data_tag_mask', None),
             'box_indices': batch.get('box_indices', None),
             'cells': batch.get('cells', None),

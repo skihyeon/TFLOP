@@ -196,33 +196,30 @@ class OTSLTokenizer:
         
         # 2. Validate syntax
         if not self.validate_syntax(tokens):
-            # print(f"Failed to encode: Invalid OTSL syntax")  # 디버깅
-            # print(f"html_structure: {html_structure}")
             raise ValueError("Invalid OTSL syntax")
         
-        # 3. Convert to IDs with special token handling
+        # 3. Convert to IDs (special token 제외)
         token_ids = []
-        token_ids.append(self.bos_token_id)  # Add BOS
-        
         for token in tokens:
             if token in self.otsl_tags:
                 token_ids.append(self.token2id[token])
             else:
                 token_ids.append(self.unk_token_id)
         
-        token_ids.append(self.eos_token_id)  # Add EOS
+        # 4. Truncation (special token 고려)
+        if truncation and len(token_ids) > max_length - 2:  # BOS/EOS를 위한 공간 확보
+            token_ids = token_ids[:max_length-2]
         
-        # 4. Truncation
-        if truncation and len(token_ids) > max_length:
-            token_ids = token_ids[:max_length-1] + [self.eos_token_id]
+        # 5. Special tokens 추가
+        final_ids = [self.bos_token_id] + token_ids + [self.eos_token_id]
         
-        # 5. Padding
+        # 6. Padding
         if padding == "max_length":
-            pad_length = max_length - len(token_ids)
+            pad_length = max_length - len(final_ids)
             if pad_length > 0:
-                token_ids.extend([self.pad_token_id] * pad_length)
+                final_ids.extend([self.pad_token_id] * pad_length)
         
-        return token_ids
+        return final_ids
     
     def decode(
         self,
@@ -231,10 +228,20 @@ class OTSLTokenizer:
     ) -> str:
         """토큰 ID를 OTSL 시퀀스로 변환"""
         tokens = []
+        special_token_ids = {
+            self.bos_token_id,
+            self.eos_token_id,
+            self.pad_token_id
+        }
+        
         for token_id in token_ids:
+            # special token은 항상 스킵
+            if token_id in special_token_ids:
+                continue
+            
             if token_id in self.id2token:
                 token = self.id2token[token_id]
-                # skip_special_tokens가 True인 경우 special token 제외
+                # 일반 special token 처리 (skip_special_tokens가 True인 경우)
                 if skip_special_tokens and token in self.special_tokens.values():
                     continue
                 tokens.append(token)

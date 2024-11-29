@@ -436,21 +436,23 @@ def extract_spans_from_otsl(otsl_tokens: List[str]) -> Tuple[np.ndarray, np.ndar
             row_span_matrix[i, j] = row_span
             col_span_matrix[i, j] = col_span
     
+    row_span_matrix = torch.tensor(row_span_matrix, dtype=torch.float32)
+    col_span_matrix = torch.tensor(col_span_matrix, dtype=torch.float32)
     return row_span_matrix, col_span_matrix
     
 
 
 def compute_span_coefficients(
-    row_spans: torch.Tensor,         # (B, N, N)
-    col_spans: torch.Tensor,         # (B, N, N)
+    row_span_matrix: torch.Tensor,         # (B, N, N)
+    col_span_matrix: torch.Tensor,         # (B, N, N)
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Span-aware contrastive coefficients 계산 (논문 Section 3.6)"""
     # 1. Row-wise coefficients
     # Overlap 계산 - 행렬 연산으로 변경
-    row_overlap = torch.matmul(row_spans, row_spans.transpose(-2, -1))  # (B, N, N)
+    row_overlap = torch.matmul(row_span_matrix, row_span_matrix.transpose(-2, -1))  # (B, N, N)
     
     # Span count 계산
-    row_span_count = row_spans.sum(dim=-1)  # (B, N)
+    row_span_count = row_span_matrix.sum(dim=-1)  # (B, N)
     
     # Coefficient 계산 (Equation 6)
     row_span_coef = row_overlap / (
@@ -461,8 +463,8 @@ def compute_span_coefficients(
     row_span_coef.diagonal(dim1=-2, dim2=-1).zero_()
     
     # 2. Column-wise coefficients (동일한 방식)
-    col_overlap = torch.matmul(col_spans, col_spans.transpose(-2, -1))
-    col_span_count = col_spans.sum(dim=-1)
+    col_overlap = torch.matmul(col_span_matrix, col_span_matrix.transpose(-2, -1))
+    col_span_count = col_span_matrix.sum(dim=-1)
     
     col_span_coef = col_overlap / (
         col_span_count.unsqueeze(-1) * col_span_count.unsqueeze(-2) + 1e-8

@@ -8,7 +8,7 @@ import torchvision.transforms as transforms
 from models.otsl_tokenizer import OTSLTokenizer
 from typing import Dict, Optional
 import jsonlines
-from utils.util import extract_spans_from_html, convert_html_to_otsl, extract_spans_from_otsl
+from utils.util import extract_spans_from_html, convert_html_to_otsl, extract_spans_from_otsl, compute_span_coefficients
 
 # 디버그 모드 설정
 DEBUG = True
@@ -136,9 +136,8 @@ class TableDataset(Dataset):
             # 3. HTML에서 span 정보 추출
             # _, row_span_matrix, col_span_matrix = extract_spans_from_html(ann['html']['structure'])
             row_span_matrix, col_span_matrix = extract_spans_from_otsl(otsl_tokens)
-            row_span_matrix = torch.tensor(row_span_matrix, dtype=torch.float32)
-            col_span_matrix = torch.tensor(col_span_matrix, dtype=torch.float32)
-            
+            row_span_coef, col_span_coef = compute_span_coefficients(row_span_matrix, col_span_matrix)
+                
             # 4. Cell 정보 추출 및 정규화
             cells = []
             bboxes = []
@@ -168,14 +167,23 @@ class TableDataset(Dataset):
             # Box indices와 data tag mask 생성
             box_indices = []
             data_tag_positions = []
-
-            # 1. OTSL sequence에서 모든 'C' 태그 위치 찾기
-            for i, token_id in enumerate(otsl_tokens):
+            special_token_ids = {
+                self.tokenizer.bos_token_id,
+                self.tokenizer.eos_token_id,
+                self.tokenizer.pad_token_id
+            }
+            
+            # special token을 제외한 실제 OTSL 토큰의 시작 인덱스 찾기
+            start_idx = 1  # BOS 토큰 다음부터
+            
+            for i, token_id in enumerate(otsl_tokens[start_idx:], start=start_idx):
+                if token_id in special_token_ids:
+                    continue
                 token = self.tokenizer.id2token[token_id]
                 if token == 'C':  # OTSL의 data cell 태그
                     data_tag_positions.append(i)
             
-            # 2. Data tag mask 생성 - 모든 'C' 태그 위치 마스킹
+            # 2. Data tag mask 생성 - special token 제외한 위치에 대해서만
             data_tag_mask = torch.zeros(len(otsl_tokens), dtype=torch.bool)
             for pos in data_tag_positions:
                 data_tag_mask[pos] = True
@@ -184,9 +192,9 @@ class TableDataset(Dataset):
             bbox_idx = 0  # bbox의 인덱스
             for cell in ann['html']['cells']:
                 if 'bbox' in cell:  # non-empty cell
-                    # 현재 bbox를 현재 위치의 'C' 태그와 매핑
-                    box_indices.append(data_tag_positions[bbox_idx])
-                    bbox_idx += 1
+                    if bbox_idx < len(data_tag_positions):  # 안전 검사 추가
+                        box_indices.append(data_tag_positions[bbox_idx])
+                        bbox_idx += 1
 
             return {
                 'image_name': image_name,
@@ -195,8 +203,8 @@ class TableDataset(Dataset):
                 'bboxes': torch.tensor(bboxes, dtype=torch.float32),
                 'box_indices': torch.tensor(box_indices, dtype=torch.long),
                 'data_tag_mask': data_tag_mask,
-                'row_spans': row_span_matrix,
-                'col_spans': col_span_matrix,
+                'row_span_coef': row_span_coef,
+                'col_span_coef': col_span_coef,
                 'cells': cells,
                 'html': ann['html']
             }
@@ -210,20 +218,42 @@ class TableDataset(Dataset):
         return len(self.image_names)
 
 if __name__ == "__main__":
-    dataset = TableDataset(data_dir="./data/pubtabnet", split="train")
-    sample = dataset[0]
+    import random
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    from utils.visualize import visualize_validation_sample
+    from pathlib import Path
     
-    rows = []
-    current_row = []
-    for token in sample['tokens']:
-        if token == "NL":
-            rows.append(current_row)
-            current_row = []
-            continue
-        current_row.append(token)
-
-    if current_row:  # 마지막 행 처리
-        rows.append(current_row)
-        
-    for r in rows:
-        print(r[0], end=" ")
+    # 데이터셋 로드
+    dataset = TableDataset(data_dir="./data/pubtabnet", split="train")
+    
+    # 랜덤 샘플 선택
+    random_idx = random.randint(0, len(dataset) - 1)
+    sample = dataset[random_idx]
+    
+    # OTSL 토큰을 문자열로 변환
+    otsl_str = ' '.join([dataset.tokenizer.id2token[tid.item()] for tid in sample['tokens']])
+    
+    # HTML 문자열 추출
+    html_str = str(sample['html']['structure'])
+    
+    os.makedirs("./debug_viz", exist_ok=True)
+    # 시각화 함수 호출
+    visualize_validation_sample(
+        image=sample['image'],
+        boxes=sample['bboxes'],
+        pred_html="",  # 예측값은 없으므로 빈 문자열
+        true_html=html_str,  # 너무 길지 않게 잘라서 표시
+        pred_otsl="",  # 예측값은 없으므로 빈 문자열
+        true_otsl=otsl_str,
+        pointer_logits=None,  # 예측값이 없으므로 None
+        step=random_idx,  # 파일명 용도로 랜덤 인덱스 사용
+        loss_components={},  # 빈 딕셔너리
+        viz_dir=Path("./debug_viz")  # 현재 경로 아래 debug_viz 폴더에 저장
+    )
+    
+    print(f"\n랜덤 샘플 {random_idx} 시각화 완료")
+    print(f"이미지 경로: ./debug_viz/images/val_step_{random_idx:08d}.png")
+    print(f"텍스트 정보: ./debug_viz/txts/val_step_{random_idx:08d}.txt")
+    print("\nOTSL 시퀀스 예시:")
+    print(otsl_str[:200], "...")

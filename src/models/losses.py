@@ -117,17 +117,20 @@ class TFLOPLoss(nn.Module):
         return loss.mean()
 
     def forward(self, batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        tag_logits: torch.Tensor = outputs['tag_logits']          # (B, L, V)
-        tag_targets: torch.Tensor = batch['tokens']                # (B, L)
-        pointer_logits: torch.Tensor = outputs['pointer_logits']     # (B, N, T)
-        empty_logits: torch.Tensor = outputs['empty_logits']       # (B, T)
-        box_indices: torch.Tensor = batch['box_indices']         # (B, N)
-        data_tag_mask: torch.Tensor = outputs['data_tag_mask']       # (B, T)
-        empty_mask: torch.Tensor = batch['empty_mask']          # (B, T)
-        row_sim_matrix: torch.Tensor = outputs['row_sim_matrix']      # (B, N, N)
-        col_sim_matrix: torch.Tensor = outputs['col_sim_matrix']      # (B, N, N)
-        row_span_coef: torch.Tensor = outputs['row_span_coef']      # (B, N, N)
-        col_span_coef: torch.Tensor = outputs['col_span_coef']       # (B, N, N)
+        # Batch inputs
+        tag_targets: torch.Tensor = batch['tokens']                 # (B, L)
+        box_indices: torch.Tensor = batch['box_indices']            # (B, N)
+        empty_mask: torch.Tensor = batch['empty_mask']              # (B, T)
+        row_span_coef: torch.Tensor = batch['row_span_coef']        # (B, N, N)
+        col_span_coef: torch.Tensor = batch['col_span_coef']        # (B, N, N)
+        
+        # Model outputs
+        tag_logits: torch.Tensor = outputs['tag_logits']            # (B, L, V)
+        pointer_logits: torch.Tensor = outputs['pointer_logits']    # (B, N, T)
+        empty_logits: torch.Tensor = outputs['empty_logits']        # (B, T)
+        data_tag_mask: torch.Tensor = outputs['data_tag_mask']      # (B, T)
+        row_sim_matrix: torch.Tensor = outputs['row_sim_matrix']    # (B, N, N)
+        col_sim_matrix: torch.Tensor = outputs['col_sim_matrix']    # (B, N, N)
         
         """Total Loss (논문 Equation 7)"""
         # 1. Classification Loss
