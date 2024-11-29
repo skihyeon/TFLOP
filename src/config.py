@@ -54,7 +54,7 @@ class TrainingConfig:
     
     # Training
     total_steps: int = 100000
-    eval_steps: int = 1900
+    eval_steps: int = 1000
     save_steps: int = 2000
     checkpoint_dir: str = "./checkpoints"
     
@@ -74,9 +74,6 @@ class TrainingConfig:
     # 새로운 설정 추가
     num_workers: int = 4
     pin_memory: bool = True
-    debug: bool = False
-    debug_samples: int = 100
-    
     # Logging
     log_every_n_steps: int = 10
     
