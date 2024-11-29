@@ -47,7 +47,7 @@ def main():
     if train_config.use_wandb:
         logger = WandbLogger(
             project="TFLOP",
-            name=timestamp,
+            name=timestamp + "_" + train_config.exp_name,
             config={
                 "model_config": model_config.to_dict(),
                 "train_config": train_config.to_dict()

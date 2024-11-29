@@ -13,7 +13,7 @@ class ValidationVisualizationCallback(Callback):
         self.viz_dir.mkdir(parents=True, exist_ok=True)
         
         # HTML 저장을 위한 디렉토리 생성
-        self.html_dir = self.viz_dir / "htmls"
+        self.html_dir = self.viz_dir / "html"
         self.html_dir.mkdir(exist_ok=True)
                 
     def on_validation_batch_end(
@@ -91,10 +91,14 @@ class ValidationVisualizationCallback(Callback):
                             padding: 8px;
                             text-align: left;
                         }}
-                        .title {{
-                            font-size: 1.2em;
-                            color: #333;
-                            margin-bottom: 10px;
+                        .pointer-info {{
+                            margin-top: 10px;
+                            font-size: 0.9em;
+                            color: #666;
+                        }}
+                        .confidence {{
+                            color: #007bff;
+                            font-weight: bold;
                         }}
                     </style>
                 </head>
@@ -111,6 +115,9 @@ class ValidationVisualizationCallback(Callback):
                         <div class="table-container">
                             <div class="title">Predicted Table</div>
                             {outputs['pred_html']}
+                            <div class="pointer-info">
+                                Pointer Confidence: {torch.softmax(outputs['pointer_logits'][0], dim=-1).max().item():.4f}
+                            </div>
                         </div>
                         
                         <div class="table-container">

@@ -10,13 +10,13 @@ from typing import Dict, Optional
 import jsonlines
 from utils.util import extract_spans_from_html, convert_html_to_otsl
 
+# 디버그 모드 설정
+DEBUG = False
+DEBUG_SAMPLES = {
+    'train': 100,
+    'val': 50
+}
 
-
-DEBUG =  False # 실제 학습 시에는 False로 변경 필요
-DEBUG_SAMPLE_SIZE = {
-            'train': 100,  # 학습용 샘플 수
-            'val': 10    # 검증용 샘플 수
-        }  # 디버깅용 샘플 수
 class TableDataset(Dataset):
     """
     테이블 이미지 데이터셋
@@ -34,6 +34,7 @@ class TableDataset(Dataset):
         use_ocr: bool = False,       # OCR engine 사용 여부
         tokenizer: Optional[OTSLTokenizer] = None
     ):
+        super().__init__()
         self.data_dir = data_dir
         self.split = split
         self.max_seq_length = max_seq_length
@@ -53,105 +54,150 @@ class TableDataset(Dataset):
             )
         ])
         
-        # 주석 파일 로드
+        # 주석 파일 로드 및 검증
         self._load_annotations()
         
     def _load_annotations(self):
         """주석 파일 로드 및 검증"""
-        jsonl_file = os.path.join(self.data_dir, f'{self.split}.jsonl')
         self.annotations = {}
-        self.image_ids = []
+        self.image_names = []
+        self.cached_otsl_tokens = {}  # OTSL 토큰 캐시 추가
         
-        # DEBUG MODE: 빠른 테스트를 위한 설정
-        if DEBUG: os.makedirs('./debugs', exist_ok=True)
+        annotation_file = os.path.join(self.data_dir, f"{self.split}.jsonl")
+        print(f"Loading {self.split} annotations from {annotation_file}")
         
+        valid_count = 0
+        total_count = 0
+        error_counts = {}
         
-        print(f"\nLoading {self.split} dataset...")
-        valid_samples = 0  # 이미지가 실제로 존재하는 샘플 수
-        valid_images_path = []
-        with jsonlines.open(jsonl_file) as reader:
-            for annotation in reader:
-                # 현재 split에 해당하는 데이터만 필터링
-                if annotation['split'] == self.split:
-                    image_id = annotation['filename'].split('.')[0]  # .png 확장자 제거
-                    image_path = os.path.join(self.data_dir, self.split, image_id + '.png')
+        with jsonlines.open(annotation_file) as reader:
+            for ann in reader:
+                # DEBUG 모드일 때 샘플 수 제한
+                if DEBUG and valid_count >= DEBUG_SAMPLES.get(self.split, 100):
+                    break
                     
-                    # 이미지 파일이 존재하는지 확인               
-                    if not os.path.exists(image_path):
+                total_count += 1
+                try:
+                    # 1. HTML 구조 검증
+                    if 'html' not in ann or 'structure' not in ann['html']:
+                        error_counts['missing_html'] = error_counts.get('missing_html', 0) + 1
                         continue
                     
-                    # DEBUG MODE: 지정된 유효한 샘플 수에 도달하면 중단
-                    if DEBUG and valid_samples >= DEBUG_SAMPLE_SIZE.get(self.split, 1):
-                        break
+                    # 2. Cell 정보 검증 - cells는 html 안에 있음
+                    if 'cells' not in ann['html']:
+                        error_counts['missing_cells'] = error_counts.get('missing_cells', 0) + 1
+                        continue
                     
-                    # HTML 구조에서 cell 정보 추출
-                    cells = []
-                    for cell_data in annotation['html']['cells']:
-                        cell_info = {
-                            'text': ' '.join(cell_data.get('tokens', [])),
-                            'bbox': cell_data.get('bbox', [0, 0, 0, 0]),
-                        }
-                        cells.append(cell_info)
+                    # 3. OTSL 변환 및 토큰화를 미리 수행
+                    try:
+                        otsl_sequence = convert_html_to_otsl(ann)
+                        otsl_tokens = self.tokenizer.encode(otsl_sequence, html_structure=ann['html']['structure'])
+                        # 검증이 완료된 토큰을 캐시에 저장
+                        self.cached_otsl_tokens[ann['filename']] = otsl_tokens
                     
-                    # 필요한 정보만 저장
-                    processed_ann = {
-                        'html': annotation['html'],  # 원본 HTML 구조 보존
-                        'cells': cells
-                    }
+                    except Exception as e:
+                        error_counts['otsl_conversion'] = error_counts.get('otsl_conversion', 0) + 1
+                        continue
                     
-                    self.annotations[image_id] = processed_ann
-                    self.image_ids.append(image_id)
-                    valid_samples += 1
+                    # 모든 검증을 통과한 샘플만 저장
+                    self.annotations[ann['filename']] = ann
+                    self.image_names.append(ann['filename'])
+                    valid_count += 1
                     
-        print(f"{self.split} 데이터셋 로드 완료:")
-        print(f"- 유효한 샘플 수: {valid_samples}")
-    
+                except Exception as e:
+                    error_counts['other'] = error_counts.get('other', 0) + 1
+                    continue
+        
+        # 최종 통계 출력
+        print(f"\nLoading complete:")
+        print(f"Total samples processed: {total_count}")
+        print(f"Valid samples: {valid_count}")
+        print("\nError statistics:")
+        for error_type, count in error_counts.items():
+            print(f"{error_type}: {count} ({count/total_count*100:.2f}%)")
+        
+        if valid_count == 0:
+            raise ValueError(f"No valid samples found in {annotation_file}")
+
     def __getitem__(self, idx: int) -> Dict:
         """데이터셋에서 하나의 샘플을 가져옴"""
-        image_id = self.image_ids[idx]
-        ann = self.annotations[image_id]
-        
-        # 1. 이미지 로드 및 전처리
-        image = Image.open(os.path.join(self.data_dir, self.split, image_id + '.png')).convert('RGB')
-        image_width, image_height = image.size
-        image = self.transform(image)
-        
-        # 2. OTSL 토큰 생성
-        otsl_sequence = convert_html_to_otsl(ann)
-        tokens = self.tokenizer.encode(otsl_sequence)
-        
-        # 3. HTML에서 span 정보 추출
-        processed_cells, row_span_matrix, col_span_matrix = extract_spans_from_html(ann['html']['structure'])
-        
-        # 4. annotation에서 cell 정보 추출 및 정규화
-        cells = []
-        bboxes = []
-        for cell in ann['cells']:  # 'cells' 리스트에서 직접 접근
-            if 'bbox' in cell:  # non-empty cells
-                x0, y0, x1, y1 = cell['bbox']
-                normalized_bbox = [
-                    x0 / image_width,
-                    y0 / image_height,
-                    x1 / image_width,
-                    y1 / image_height
-                ]
-                bboxes.append(normalized_bbox)
-                cells.append({
-                    'text': cell['text'],
-                    'bbox': normalized_bbox
-                })
-        
-        return {
-            'image_id': image_id,
-            'image': image,
-            'tokens': torch.tensor(tokens, dtype=torch.long),
-            'bboxes': torch.tensor(bboxes, dtype=torch.float32),
-            'row_spans': torch.tensor(row_span_matrix, dtype=torch.float32),
-            'col_spans': torch.tensor(col_span_matrix, dtype=torch.float32),
-            'cells': cells,  # cell 정보 추가 (text와 bbox 포함)
-            'html': ann['html'],  # 디버깅용
-        }
+        try:
+            image_name = self.image_names[idx]
+            ann = self.annotations[image_name]
+            
+            # 1. 이미지 로드 및 전처리
+            image = Image.open(os.path.join(self.data_dir, self.split, image_name)).convert('RGB')
+            image_width, image_height = image.size
+            image = self.transform(image)
+            
+            # 2. 캐시된 OTSL 토큰 사용
+            otsl_tokens = self.cached_otsl_tokens[image_name]
+            
+            # 3. HTML에서 span 정보 추출
+            _, row_span_matrix, col_span_matrix = extract_spans_from_html(ann['html']['structure'])
+            row_span_matrix = torch.tensor(row_span_matrix, dtype=torch.float32)
+            col_span_matrix = torch.tensor(col_span_matrix, dtype=torch.float32)
+            
+            # 4. Cell 정보 추출 및 정규화
+            cells = []
+            bboxes = []
+            for cell in ann['html']['cells']:
+                if 'bbox' in cell:
+                    x0, y0, x1, y1 = cell['bbox']
+                    normalized_bbox = [
+                        x0 / image_width,
+                        y0 / image_height,
+                        x1 / image_width,
+                        y1 / image_height
+                    ]
+                    bboxes.append(normalized_bbox)
+                    
+                    # tokens를 하나의 텍스트로 합치기
+                    text = ''.join(cell['tokens'])
+                    # HTML 태그 제거 (선택사항)
+                    text = text.replace('<b>', '').replace('</b>', '') \
+                             .replace('<i>', '').replace('</i>', '') \
+                             .replace('<sup>', '').replace('</sup>', '')
+                    
+                    cells.append({
+                        'text': text,
+                        'bbox': normalized_bbox
+                    })
+            
+            return {
+                'image_name': image_name,
+                'image': image,
+                'tokens': torch.tensor(otsl_tokens, dtype=torch.long),
+                'bboxes': torch.tensor(bboxes, dtype=torch.float32),
+                'row_spans': row_span_matrix,
+                'col_spans': col_span_matrix,
+                'cells': cells,
+                'html': ann['html']
+            }
+            
+        except Exception as e:
+            print(f"Error processing sample {idx}: {str(e)}")
+            # 다음 유효한 샘플 반환
+            return self.__getitem__((idx + 1) % len(self))
 
     def __len__(self) -> int:
-        return len(self.image_ids)
+        return len(self.image_names)
+
+if __name__ == "__main__":
+    dataset = TableDataset(data_dir="./data/pubtabnet", split="train")
+    sample = dataset[0]
     
+    rows = []
+    current_row = []
+    for token in sample['tokens']:
+        if token == "NL":
+            rows.append(current_row)
+            current_row = []
+            continue
+        current_row.append(token)
+
+    if current_row:  # 마지막 행 처리
+        rows.append(current_row)
+        
+    for r in rows:
+        print(r[0], end=" ")

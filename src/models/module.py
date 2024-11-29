@@ -81,22 +81,12 @@ class TFLOPLightningModule(pl.LightningModule):
         
         # 1. Loss 로깅 - 메트릭 이름에서 _step 제거
         for name, value in loss_dict.items():
-            metric_name = f"val/{name}"
-            self.log(metric_name, value, 
+            self.log(f"val/{name}", value, 
                     batch_size=batch_size,
-                    on_step=True,  # step 단위 로깅 활성화
-                    on_epoch=True,  # epoch 단위 로깅도 활성화
-                    prog_bar=False,
+                    on_step=False,     # 스텝별 로깅 비활성화
+                    on_epoch=True,     # 에폭 평균 계산
+                    prog_bar=(name == 'loss'),
                     sync_dist=True)
-            
-            # progress bar용 별도 로깅 (step 단위, _step 없이)
-            if name == 'loss':
-                self.log('val_loss', value,  # progress bar용
-                        batch_size=batch_size,
-                        on_step=True,
-                        on_epoch=False,
-                        prog_bar=True,
-                        sync_dist=True)
         
         # 2. TEDS 메트릭 계산 및 로깅
         try:
@@ -134,28 +124,18 @@ class TFLOPLightningModule(pl.LightningModule):
             teds_struct = compute_teds_struct(pred_html, true_html)
             
             # TEDS 메트릭 로깅 - _step 없이 로깅
-            self.log('val_teds', teds,  # _step 없는 이름으로 로깅
-                     batch_size=batch_size,
-                     on_step=True,
-                     on_epoch=False,
-                     prog_bar=True)
-            self.log('val_teds_s', teds_struct,  # _step 없는 이름으로 로깅
-                     batch_size=batch_size,
-                     on_step=True,
-                     on_epoch=False,
-                     prog_bar=True)
-            
-            # epoch 단위 메트릭은 별도로 로깅
             self.log('val/teds', teds,
-                     batch_size=batch_size,
-                     on_step=False,
-                     on_epoch=True,
-                     prog_bar=False)
+                    batch_size=batch_size,
+                    on_step=False,     # 스텝별 로깅 비활성화
+                    on_epoch=True,     # 에폭 평균 계산
+                    prog_bar=True,
+                    sync_dist=True)
             self.log('val/teds_s', teds_struct,
-                     batch_size=batch_size,
-                     on_step=False,
-                     on_epoch=True,
-                     prog_bar=False)
+                    batch_size=batch_size,
+                    on_step=False,     # 스텝별 로깅 비활성화
+                    on_epoch=True,     # 에폭 평균 계산
+                    prog_bar=True,
+                    sync_dist=True)
             
             # 3. 첫 번째 배치의 첫 번째 샘플에 대해서만 시각화 데이터 준비
             if batch_idx == 0:
