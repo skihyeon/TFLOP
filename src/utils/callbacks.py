@@ -43,7 +43,6 @@ class ValidationVisualizationCallback(Callback):
                 true_otsl=outputs['true_otsl'],
                 pointer_logits=outputs.get('pointer_logits', None),
                 step=trainer.global_step,
-                loss_components=loss_components,
                 viz_dir=self.viz_dir
             )
             

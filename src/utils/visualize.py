@@ -15,136 +15,157 @@ def visualize_validation_sample(
         true_otsl: str,
         pointer_logits: Optional[torch.Tensor],
         step: int,
-        loss_components: Dict[str, float],
         viz_dir: Path
     ) -> None:
-        """검증 샘플 시각화"""
-        plt.figure(figsize=(20, 8))
-        
-        # 이미지 역정규화
-        mean = torch.tensor([0.485, 0.456, 0.406])
-        std = torch.tensor([0.229, 0.224, 0.225])
-        img = image.cpu().numpy()
-        for i in range(3):
-            img[i] = img[i] * std[i].item() + mean[i].item()
-        img = np.transpose(img, (1, 2, 0))
-        img = np.clip(img, 0, 1)
-        
-        H, W = image.shape[1:]
-        
-        # OTSL 토큰 파싱
-        true_otsl_tokens = true_otsl.split()
-        pred_otsl_tokens = pred_otsl.split()
-        
-        # 1-1. GT 박스와 OTSL 태그 시각화 (왼쪽)
-        ax1 = plt.subplot(1, 2, 1)
-        ax1.imshow(img)
-        ax1.set_title('Ground Truth Boxes with OTSL Tags')
-        
-        # GT OTSL 태그에서 각 박스의 태그 찾기
-        box_tags = []
-        current_tag = None
-        tag_count = 0
-        
-        for token in true_otsl_tokens:
+    """검증 샘플 시각화"""
+    plt.figure(figsize=(20, 8))
+    
+    # 이미지 역정규화
+    mean = torch.tensor([0.485, 0.456, 0.406])
+    std = torch.tensor([0.229, 0.224, 0.225])
+    img = image.cpu().numpy()
+    for i in range(3):
+        img[i] = img[i] * std[i].item() + mean[i].item()
+    img = np.transpose(img, (1, 2, 0))
+    img = np.clip(img, 0, 1)
+    
+    H, W = image.shape[1:]
+    
+    # OTSL 토큰을 그리드로 변환
+    def tokens_to_grid(otsl_str):
+        tokens = [t for t in otsl_str.split() if t not in ['[BOS]', '[EOS]', '[PAD]']]
+        grid = []
+        current_row = []
+        for token in tokens:
             if token == 'NL':
-                continue
-            if tag_count < len(boxes):
-                box_tags.append(token)
-                tag_count += 1
+                if current_row:
+                    grid.append(current_row)
+                    current_row = []
+            else:
+                current_row.append(token)
+        if current_row:
+            grid.append(current_row)
+        return grid
+    
+    true_grid = tokens_to_grid(true_otsl)
+    pred_grid = tokens_to_grid(pred_otsl)
+    
+    def visualize_grid(ax, grid, boxes, pointer_logits=None, title=''):
+        ax.imshow(img)
+        ax.set_title(title)
         
-        for i, (box, tag) in enumerate(zip(boxes, box_tags)):
-            x1, y1, x2, y2 = box.cpu().numpy()
-            color = 'r' if tag == 'C' else 'b' if tag == 'L' else 'g' if tag == 'U' else 'y'
-            
-            rect = patches.Rectangle(
-                (x1 * W, y1 * H),
-                (x2 - x1) * W,
-                (y2 - y1) * H,
-                linewidth=2,
-                edgecolor=color,
-                facecolor='none',
-                alpha=0.7
-            )
-            ax1.add_patch(rect)
-            
-            # 박스 번호와 OTSL 태그 표시
-            ax1.text(x1 * W, y1 * H, 
-                    f"Box {i}\n{tag}", 
-                    color='black', fontsize=8, 
-                    bbox=dict(facecolor='white', alpha=0.7))
+        # bbox 인덱스 추적
+        box_idx = 0
+        cell_boxes = {}  # (i,j) -> box 매핑 저장
         
-        # 1-2. Pred 박스와 OTSL 태그 시각화 (오른쪽)
-        ax2 = plt.subplot(1, 2, 2)
-        ax2.imshow(img)
-        ax2.set_title('Predicted Box-OTSL Tag Matching')
-        
-        if pointer_logits is not None:
-            pointer_logits = pointer_logits[0]  # 첫 번째 배치만 사용
-            max_indices = pointer_logits.argmax(dim=-1)
-            max_values = pointer_logits.max(dim=-1)[0]
-            
-            # confidence에 따른 색상 맵 생성
-            cmap = plt.cm.get_cmap('YlOrRd')
-            
-            for i, box in enumerate(boxes):
-                if max_indices[i].item() > 0:  # 0은 패딩
-                    x1, y1, x2, y2 = box.cpu().numpy()
-                    confidence = torch.sigmoid(max_values[i]).item()
-                    
-                    # 예측된 OTSL 태그 가져오기
-                    token_idx = max_indices[i].item()
-                    if token_idx < len(pred_otsl_tokens):
-                        otsl_tag = pred_otsl_tokens[token_idx]
+        # 1. 먼저 모든 'C' 토큰의 bbox 그리기
+        for i, row in enumerate(grid):
+            for j, token in enumerate(row):
+                if token == 'C':
+                    # bbox가 있는 경우
+                    if box_idx < len(boxes):
+                        box = boxes[box_idx].cpu().numpy()
+                        x1, y1, x2, y2 = box
+                        
+                        rect = patches.Rectangle(
+                            (x1 * W, y1 * H),
+                            (x2 - x1) * W,
+                            (y2 - y1) * H,
+                            linewidth=2,
+                            edgecolor='red',
+                            facecolor='none',
+                            alpha=0.7
+                        )
+                        ax.add_patch(rect)
+                        
+                        # 셀 정보 표시
+                        text = f"({i},{j})\n{token}"
+                        if pointer_logits is not None:
+                            confidence = torch.sigmoid(pointer_logits[0, box_idx].max()).item()
+                            text += f"\n{confidence:.2f}"
+                        
+                        ax.text(x1 * W, y1 * H, 
+                                text,
+                                color='black', fontsize=5, 
+                                bbox=dict(facecolor='white', alpha=0.7, pad=0.2))
+                        
+                        cell_boxes[(i,j)] = box
+                        box_idx += 1
                     else:
-                        otsl_tag = 'UNK'
+                        # bbox가 없는 'C' 토큰 (빈 셀)
+                        # 이전 셀의 위치를 기반으로 추정된 위치에 점선으로 표시
+                        if j > 0 and (i,j-1) in cell_boxes:
+                            prev_box = cell_boxes[(i,j-1)]
+                            x2, y1 = prev_box[2], prev_box[1]
+                            ax.text(x2 * W + 10, y1 * H, 
+                                    f"({i},{j})\n{token}\n(empty)",
+                                    color='black', fontsize=5,
+                                    bbox=dict(facecolor='lightgray', alpha=0.3, pad=0.2))
+                
+                # 2. span 관계 표시 (L, U, X 토큰)
+                elif token in ['L', 'U', 'X']:
+                    # span 관계 찾기
+                    ref_cells = []
+                    if token in ['L', 'X'] and j > 0:  # 왼쪽 참조
+                        ref_cells.append((i, j-1))
+                    if token in ['U', 'X'] and i > 0:  # 위쪽 참조
+                        ref_cells.append((i-1, j))
                     
-                    color = 'r' if otsl_tag == 'C' else 'b' if otsl_tag == 'L' else 'g' if otsl_tag == 'U' else 'y'
-                    
-                    rect = patches.Rectangle(
-                        (x1 * W, y1 * H),
-                        (x2 - x1) * W,
-                        (y2 - y1) * H,
-                        linewidth=2,
-                        edgecolor=color,
-                        facecolor=color,
-                        alpha=confidence * 0.3
-                    )
-                    ax2.add_patch(rect)
-                    
-                    # 박스 번호, OTSL 태그, confidence 표시
-                    ax2.text(x1 * W, y1 * H, 
-                            f"Box {i}\n{otsl_tag}\n{confidence:.2f}", 
-                            color='black', fontsize=8, 
-                            bbox=dict(facecolor='white', alpha=0.7))
-        
-        # # Loss components 출력
-        # loss_str = " | ".join([
-        #     f"{k.replace('_', ' ').title()}: {v:.4f}"
-        #     for k, v in loss_components.items()
-        # ])
-        # plt.figtext(0.1, 0.02, loss_str, fontsize=10)
-        
-        # plt.figtext(0.1, -0.08,
-        #             f"Pred OTSL: {pred_otsl[:100]}...\n"
-        #             f"True OTSL: {true_otsl[:100]}...\n"
-        #             f"Pred HTML: {pred_html[:100]}...\n"
-        #             f"True HTML: {true_html[:100]}...",
-        #             fontsize=8)
-        
-        plt.tight_layout()
-        
-        # 저장
-        img_dir = viz_dir / "images"
-        txt_dir = viz_dir / "txts"   
-        img_dir.mkdir(exist_ok=True)
-        txt_dir.mkdir(exist_ok=True)
-        save_path = img_dir / f'val_step_{step:08d}.png'
-        plt.savefig(save_path, bbox_inches='tight', dpi=300, pad_inches=0.2)
-        plt.close()
-        save_txt = txt_dir / f'val_step_{step:08d}.txt'
-        with open(save_txt, 'w') as f:
-            f.write(f"Pred OTSL: {pred_otsl}\n")
-            f.write(f"True OTSL: {true_otsl}\n")
-            f.write(f"Pred HTML: {pred_html}\n")
-            f.write(f"True HTML: {true_html}")
+                    # 참조하는 셀들과 화살표로 연결
+                    for ref_i, ref_j in ref_cells:
+                        if (ref_i, ref_j) in cell_boxes:
+                            ref_box = cell_boxes[(ref_i, ref_j)]
+                            x1, y1, x2, y2 = ref_box
+                            
+                            # 화살표 스타일 설정
+                            arrow_style = patches.ArrowStyle('->', head_length=10, head_width=7)
+                            color = 'blue' if token == 'L' else 'green' if token == 'U' else 'orange'
+                            
+                            # 화살표 그리기
+                            arrow = patches.FancyArrowPatch(
+                                (x2 * W, y1 * H),  # 시작점
+                                (x2 * W + 30, y1 * H),  # 끝점
+                                arrowstyle=arrow_style,
+                                color=color,
+                                alpha=0.7
+                            )
+                            ax.add_patch(arrow)
+                            
+                            # span 정보 표시
+                            ax.text(x2 * W + 35, y1 * H, 
+                                    f"({i},{j})\n{token}", 
+                                    color='black', fontsize=5,
+                                    bbox=dict(facecolor=color, alpha=0.3, pad=0.2))
+    
+    # Ground Truth 시각화
+    ax1 = plt.subplot(1, 2, 1)
+    visualize_grid(ax1, tokens_to_grid(true_otsl), boxes, title='Ground Truth Structure')
+    
+    # Prediction 시각화
+    ax2 = plt.subplot(1, 2, 2)
+    visualize_grid(ax2, tokens_to_grid(pred_otsl), boxes, pointer_logits, title='Predicted Structure')
+    
+    
+    # 저장
+    img_dir = viz_dir / "images"
+    txt_dir = viz_dir / "txts"   
+    img_dir.mkdir(exist_ok=True)
+    txt_dir.mkdir(exist_ok=True)
+    
+    save_path = img_dir / f'val_step_{step:08d}.png'
+    plt.savefig(save_path, bbox_inches='tight', dpi=300, pad_inches=0.2)
+    plt.close()
+    
+    # OTSL 및 HTML 저장
+    save_txt = txt_dir / f'val_step_{step:08d}.txt'
+    with open(save_txt, 'w') as f:
+        f.write(f"Ground Truth Grid Structure:\n")
+        for i, row in enumerate(true_grid):
+            f.write(f"Row {i}: {' '.join(row)}\n")
+        f.write(f"\nPredicted Grid Structure:\n")
+        for i, row in enumerate(pred_grid):
+            f.write(f"Row {i}: {' '.join(row)}\n")
+        f.write(f"\nPred OTSL: {pred_otsl}\n")
+        f.write(f"True OTSL: {true_otsl}\n")
+        f.write(f"Pred HTML: {pred_html}\n")
+        f.write(f"True HTML: {true_html}")
