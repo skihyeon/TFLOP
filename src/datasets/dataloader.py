@@ -15,6 +15,7 @@ def collate_fn(batch: List[Dict]) -> Dict[str, Union[torch.Tensor, List[str]]]:
     # Basic information
     images = torch.stack([item['image'] for item in batch])
     html = [item['html'] for item in batch]
+    cells = [item['cells'] for item in batch]
     
     # Get maximum sizes in batch
     max_boxes = max(item['bboxes'].size(0) for item in batch)
@@ -23,60 +24,73 @@ def collate_fn(batch: List[Dict]) -> Dict[str, Union[torch.Tensor, List[str]]]:
         1376  # 논문 4.2
     )
     
-    # 모든 시퀀스를 동일한 길이로 맞춤
-    for item in batch:
-        item['tokens'] = item['tokens'][:max_seq_len]
-    
     # Prepare tensors for batch
     batch_boxes = []      # box coordinates
-    batch_row_spans = []  # row span matrices
-    batch_col_spans = []  # column span matrices
+    batch_row_span_coef = []  # row span matrices
+    batch_col_span_coef = []  # column span matrices
     batch_tokens = []     # OTSL tokens
     batch_attention_mask = [] # attention mask for tokens
+    batch_data_tag_masks = []  # data tag masks
+    batch_box_indices = []  # box indices for pointer loss
     
     for item in batch:
         num_boxes = item['bboxes'].size(0)
         seq_len = min(item['tokens'].size(0), max_seq_len)
         
-        # 1. Box coordinates (normalized)
+        # 1. Box coordinates
         padded_boxes = torch.zeros(max_boxes, 4, device=item['bboxes'].device)
         padded_boxes[:num_boxes] = item['bboxes']
         batch_boxes.append(padded_boxes)
         
-        # 2. Span matrices
-        # row_spans와 col_spans는 이제 (max_rows, max_cols) 형태
-        row_span_shape = item['row_spans'].shape
-        col_span_shape = item['col_spans'].shape
+        # 2. Span matrices - 실제 box 개수만큼만 패딩
+        row_span_coef = item['row_span_coef']  # (N, N)
+        col_span_coef = item['col_span_coef']  # (N, N)
         
-        padded_row_spans = torch.zeros(max_boxes, max_boxes, device=item['row_spans'].device)
-        padded_row_spans[:row_span_shape[0], :row_span_shape[1]] = item['row_spans']
-        batch_row_spans.append(padded_row_spans)
+        # max_boxes 크기로 한 번만 패딩
+        padded_row_span_coef = torch.zeros(max_boxes, max_boxes, device=row_span_coef.device)
+        padded_col_span_coef = torch.zeros(max_boxes, max_boxes, device=col_span_coef.device)
         
-        padded_col_spans = torch.zeros(max_boxes, max_boxes, device=item['col_spans'].device)
-        padded_col_spans[:col_span_shape[0], :col_span_shape[1]] = item['col_spans']
-        batch_col_spans.append(padded_col_spans)
+        # 실제 span 정보만 복사
+        padded_row_span_coef[:num_boxes, :num_boxes] = row_span_coef[:num_boxes, :num_boxes]
+        padded_col_span_coef[:num_boxes, :num_boxes] = col_span_coef[:num_boxes, :num_boxes]
+        
+        batch_row_span_coef.append(padded_row_span_coef)
+        batch_col_span_coef.append(padded_col_span_coef)
         
         # 3. OTSL tokens
         padded_tokens = torch.full((max_seq_len,), 
-                                 fill_value=item['tokens'].new_zeros(1)[0],  # padding token id
+                                 fill_value=1,  # pad_token_id = 1
                                  device=item['tokens'].device)
         padded_tokens[:seq_len] = item['tokens'][:seq_len]
         batch_tokens.append(padded_tokens)
         
-        # 4. Attention mask (1 for real tokens, 0 for padding)
         attention_mask = torch.zeros(max_seq_len, device=item['tokens'].device)
         attention_mask[:seq_len] = 1
         batch_attention_mask.append(attention_mask)
+        
+        # 4. Data tag mask - 시퀀스 길이까지만
+        padded_data_tag_mask = torch.zeros(max_seq_len, dtype=torch.bool, device=item['data_tag_mask'].device)
+        padded_data_tag_mask[:seq_len] = item['data_tag_mask'][:seq_len]
+        batch_data_tag_masks.append(padded_data_tag_mask)
+        
+        # 5. Box indices - 실제 box 개수만큼만
+        batch_box_indices.append(item['box_indices'][:num_boxes])
     
-    # Stack all tensors
     return {
         'images': images,                                # (B, 3, 768, 768)
         'bboxes': torch.stack(batch_boxes),              # (B, N, 4)
-        'row_spans': torch.stack(batch_row_spans),       # (B, N, N)
-        'col_spans': torch.stack(batch_col_spans),       # (B, N, N)
+        'row_span_coef': torch.stack(batch_row_span_coef),       # (B, N, N)
+        'col_span_coef': torch.stack(batch_col_span_coef),       # (B, N, N)
         'tokens': torch.stack(batch_tokens),             # (B, L)
         'attention_mask': torch.stack(batch_attention_mask), # (B, L)
-        'html': html                                     # List[Dict] - 원본 HTML 구조
+        'data_tag_mask': torch.stack(batch_data_tag_masks), # (B, L)
+        'box_indices': torch.nn.utils.rnn.pad_sequence(  # (B, N')
+            batch_box_indices, 
+            batch_first=True,
+            padding_value=-1
+        ),
+        'cells': cells,
+        'html': html
     }
 
 def create_dataloader(

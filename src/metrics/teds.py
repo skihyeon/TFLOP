@@ -116,14 +116,14 @@ def compute_tree_edit_distance(tree1: Node, tree2: Node) -> int:
         get_label=get_label
     )
 
-def compute_teds(pred_html: str, true_html: str) -> float:
+def compute_teds(pred_html: str, true_html: str) -> Optional[float]:
     """TEDS 계산"""
     try:
         pred_tree = html_to_tree(pred_html)
         true_tree = html_to_tree(true_html)
         
         if pred_tree is None or true_tree is None:
-            return 0.0
+            return None
         
         edit_distance = compute_tree_edit_distance(pred_tree, true_tree)
         
@@ -134,15 +134,22 @@ def compute_teds(pred_html: str, true_html: str) -> float:
         true_size = count_nodes(true_tree)
         
         teds = 1 - (edit_distance / max(pred_size, true_size))
-        return max(0.0, min(1.0, teds))
+        
+        # 값이 예상 범위를 벗어나면 None 반환
+        if not (0.0 <= teds <= 1.0):
+            return 0.0
+            
+        return teds
         
     except Exception as e:
         print(f"Error computing TEDS: {e}")
-        return 0.0
+        return None
 
-def compute_teds_struct(pred_html: str, true_html: str) -> float:
+
+def compute_teds_struct(pred_html: str, true_html: str) -> Optional[float]:
     """TEDS-Struct 계산"""
     def remove_text(html: str) -> str:
-        return re.sub(r'>(.*?)</td>', '/>', html)
+        # 태그 구조는 유지하면서 텍스트만 제거
+        return re.sub(r'>([^<]*)</td>', '></td>', html)
     
     return compute_teds(remove_text(pred_html), remove_text(true_html))

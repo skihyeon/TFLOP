@@ -93,48 +93,90 @@ class OTSLTokenizer:
         
         # 규칙 6: 직사각형 규칙 - 모든 행의 길이가 동일해야 함
         if not rows:
-            print("Validation failed: No rows found")  # 디버깅
+            # print("Validation failed: No rows found")  # 디버깅
             return False
         if not all(len(row) == len(rows[0]) for row in rows):
-            print(f"Validation failed: Inconsistent row lengths - {[len(row) for row in rows]}")  # 디버깅
+            # print(f"Validation failed: Inconsistent row lengths - {[len(row) for row in rows]}")  # 디버깅
             return False
                 
         for i, row in enumerate(rows):
             for j, token in enumerate(row):
                 # 규칙 4: 첫 번째 행은 L과 C만 허용
                 if i == 0 and token not in ["C", "L"]:
-                    print(f"Validation failed: Invalid token '{token}' in first row")  # 디버깅
+                    # print(f"Validation failed: Invalid token '{token}' in first row")  # 디버깅
+                    # print("Grid:")
+                    # for r in rows:
+                    #     print(" ".join(r))
                     return False
                         
-                # 규칙 5: 첫 번째 열은 U와 C만 허용
+                # 규칙 5: 첫 번째 열은 U와 C만 허용 
                 if j == 0 and token not in ["C", "U"]:
-                    print(f"Validation failed: Invalid token '{token}' in first column")  # 디버깅
+                    # print(f"Validation failed: Invalid token '{token}' in first column")  # 디버깅
+                    # print("Grid:")
+                    # for r in rows:
+                    #     print(" ".join(r))
                     return False
                         
                 # 규칙 1: L 셀의 왼쪽 이웃은 L 또는 C여야 함
                 if token == "L" and j > 0 and row[j-1] not in ["C", "L"]:
-                    print(f"Validation failed: Invalid left neighbor '{row[j-1]}' for L token")  # 디버깅
+                    # print(f"Validation failed: Invalid left neighbor '{row[j-1]}' for L token")  # 디버깅
+                    # print("Grid:")
+                    # for r in rows:
+                    #     print(" ".join(r))
                     return False
                         
                 # 규칙 2: U 셀의 위쪽 이웃은 U 또는 C여야 함
                 if token == "U" and i > 0 and rows[i-1][j] not in ["C", "U"]:
-                    print(f"Validation failed: Invalid upper neighbor '{rows[i-1][j]}' for U token")  # 디버깅
+                    # print(f"Validation failed: Invalid upper neighbor '{rows[i-1][j]}' for U token")  # 디버깅
+                    # print("Grid:")
+                    # for r in rows:
+                    #     print(" ".join(r))
                     return False
                         
                 # 규칙 3: X 셀 규칙
                 if token == "X":
                     if j == 0 or i == 0:  # X는 첫 행/열에 올 수 없음
-                        print("Validation failed: X token in first row/column")  # 디버깅
+                        # print("Validation failed: X token in first row/column")  # 디버깅
+                        # print("Grid:")
+                        # for r in rows:
+                        #     print(" ".join(r))
                         return False
                     # 왼쪽 이웃은 X 또는 U여야 함
                     if row[j-1] not in ["X", "U"]:
-                        print(f"Validation failed: Invalid left neighbor '{row[j-1]}' for X token")  # 디버깅
+                        # print(f"Validation failed: Invalid left neighbor '{row[j-1]}' for X token")  # 디버깅
+                        # print("Grid:")
+                        # for r in rows:
+                        #     print(" ".join(r))
                         return False
                     # 위쪽 이웃은 X 또는 L이어야 함
                     if rows[i-1][j] not in ["X", "L"]:
-                        print(f"Validation failed: Invalid upper neighbor '{rows[i-1][j]}' for X token")  # 디버깅
+                        # print(f"Validation failed: Invalid upper neighbor '{rows[i-1][j]}' for X token")  # 디버깅
+                        # print("Grid:")
+                        # for r in rows:
+                        #     print(" ".join(r))
                         return False
-        
+        return True
+
+    def validate_otsl_sequence(self, sequence: str) -> bool:
+        """OTSL 시퀀스 유효성 검사"""
+        tokens = sequence.split()
+        if not tokens:
+            return False
+            
+        # 각 행이 최소 하나의 셀을 포함하는지 확인
+        current_row = []
+        for token in tokens:
+            if token == 'NL':
+                if not current_row:  # 빈 행 체크
+                    return False
+                current_row = []
+            else:
+                current_row.append(token)
+                
+        # 마지막 행 체크
+        if not current_row:
+            return False
+            
         return True
 
     def encode(
@@ -142,7 +184,8 @@ class OTSLTokenizer:
         text: str,
         max_length: Optional[int] = None,
         padding: str = "max_length",
-        truncation: bool = True
+        truncation: bool = True,
+        html_structure: Optional[str] = None
     ) -> List[int]:
         """OTSL 시퀀스를 토큰 ID로 변환"""
         if max_length is None:
@@ -153,32 +196,30 @@ class OTSLTokenizer:
         
         # 2. Validate syntax
         if not self.validate_syntax(tokens):
-            print(f"Failed to encode: Invalid OTSL syntax")  # 디버깅
             raise ValueError("Invalid OTSL syntax")
         
-        # 3. Convert to IDs with special token handling
+        # 3. Convert to IDs (special token 제외)
         token_ids = []
-        token_ids.append(self.bos_token_id)  # Add BOS
-        
         for token in tokens:
             if token in self.otsl_tags:
                 token_ids.append(self.token2id[token])
             else:
                 token_ids.append(self.unk_token_id)
         
-        token_ids.append(self.eos_token_id)  # Add EOS
+        # 4. Truncation (special token 고려)
+        if truncation and len(token_ids) > max_length - 2:  # BOS/EOS를 위한 공간 확보
+            token_ids = token_ids[:max_length-2]
         
-        # 4. Truncation
-        if truncation and len(token_ids) > max_length:
-            token_ids = token_ids[:max_length-1] + [self.eos_token_id]
+        # 5. Special tokens 추가
+        final_ids = [self.bos_token_id] + token_ids + [self.eos_token_id]
         
-        # 5. Padding
+        # 6. Padding
         if padding == "max_length":
-            pad_length = max_length - len(token_ids)
+            pad_length = max_length - len(final_ids)
             if pad_length > 0:
-                token_ids.extend([self.pad_token_id] * pad_length)
+                final_ids.extend([self.pad_token_id] * pad_length)
         
-        return token_ids
+        return final_ids
     
     def decode(
         self,
@@ -187,10 +228,20 @@ class OTSLTokenizer:
     ) -> str:
         """토큰 ID를 OTSL 시퀀스로 변환"""
         tokens = []
+        special_token_ids = {
+            self.bos_token_id,
+            self.eos_token_id,
+            self.pad_token_id
+        }
+        
         for token_id in token_ids:
+            # special token은 항상 스킵
+            if token_id in special_token_ids:
+                continue
+            
             if token_id in self.id2token:
                 token = self.id2token[token_id]
-                # skip_special_tokens가 True인 경우 special token 제외
+                # 일반 special token 처리 (skip_special_tokens가 True인 경우)
                 if skip_special_tokens and token in self.special_tokens.values():
                     continue
                 tokens.append(token)
