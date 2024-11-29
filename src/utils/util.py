@@ -116,130 +116,117 @@ def extract_spans_from_html(html_structure: Dict) -> Tuple[List[Dict], np.ndarra
     return processed_cells, row_span_matrix, col_span_matrix
     
 def convert_html_to_otsl(ann: Dict) -> str:
-    """HTML 구조를 OTSL 토큰으로 변환"""
-    html_structure = ann['html']['structure']
-    tokens = html_structure['tokens']
-    
-    # 1. 그리드 크기 계산
-    num_rows = 0
-    num_cols = 0
-    max_cols = 0
-    
-    i = 0
-    in_first_row = False
-    while i < len(tokens):
-        token = tokens[i]
-        if token == '<tr>':
-            num_rows += 1
-            current_cols = 0
-            in_first_row = (num_rows == 1)
-        elif (token == '<td' or token == '<td>') and in_first_row:
-            # colspan 확인
-            colspan = 1
-            if token == '<td':
-                i += 1
-                while i < len(tokens) and tokens[i] != '>':
-                    if 'colspan="' in tokens[i]:
-                        colspan = int(tokens[i].split('"')[1])
-                    i += 1
-            current_cols += colspan
-            max_cols = max(max_cols, current_cols)
-        elif token == '</tr>' and in_first_row:
-            num_cols = max_cols
-            in_first_row = False
-        i += 1
-    
-    # 2. 그리드 초기화
-    grid = [[None] * num_cols for _ in range(num_rows)]
-    
-    # 3. HTML 토큰을 순회하며 OTSL 그리드 생성
-    current_row = -1
-    current_col = 0
-    i = 0
-    
-    while i < len(tokens):
-        token = tokens[i]
-        if token == '<tr>':
-            current_row += 1
-            current_col = 0
-        elif token == '<td' or token == '<td>':
-            # colspan과 rowspan 확인
-            colspan = 1
-            rowspan = 1
-            
-            if token == '<td':
-                i += 1
-                while i < len(tokens) and tokens[i] != '>':
-                    if 'colspan="' in tokens[i]:
-                        colspan = int(tokens[i].split('"')[1])
-                    elif 'rowspan="' in tokens[i]:
-                        rowspan = int(tokens[i].split('"')[1])
-                    i += 1
-            
-            # 이미 채워진 셀 건너뛰기
-            while current_col < num_cols and grid[current_row][current_col] is not None:
-                current_col += 1
-                
-            if current_col < num_cols:
-                # 1. 시작 셀은 항상 'C'
-                grid[current_row][current_col] = 'C'
-                
-                # 2. colspan 처리 (수평 병합)
-                for c in range(current_col + 1, min(current_col + colspan, num_cols)):
-                    grid[current_row][c] = 'L'
-                
-                # 3. rowspan 처리 (수직 병합)
-                if rowspan > 1:
-                    for r in range(current_row + 1, min(current_row + rowspan, num_rows)):
-                        if colspan == 1:
-                            grid[r][current_col] = 'U'
-                        else:
-                            grid[r][current_col] = 'U'
-                            for c in range(current_col + 1, min(current_col + colspan, num_cols)):
-                                grid[r][c] = 'X'
-                
-                current_col += colspan
+    try:
+        html_tokens = ann['html']['structure']['tokens']
         
-        # rowspan 처리를 위한 추가 검사
-        elif token == '</tr>':
-            # 현재 행의 나머지 열들에 대해 위쪽 셀의 rowspan 확인
-            while current_col < num_cols:
-                if grid[current_row][current_col] is None and current_row > 0:
-                    # 위쪽 셀 확인
-                    above_cell = grid[current_row - 1][current_col]
-                    if above_cell == 'C' or above_cell == 'U':
-                        grid[current_row][current_col] = 'U'
-                        # 위쪽 셀이 colspan된 경우 'X' 처리
-                        next_col = current_col + 1
-                        while next_col < num_cols and grid[current_row - 1][next_col] == 'L':
-                            grid[current_row][next_col] = 'X'
-                            next_col += 1
-                current_col += 1
-        i += 1
-    
-    # 4. 빈 셀을 'C'로 채우기
-    for i in range(num_rows):
-        for j in range(num_cols):
-            if grid[i][j] is None:
-                grid[i][j] = 'C'
-    
-    # 5. OTSL 시퀀스 생성
-    tokens = []
-    for row in grid:
-        tokens.extend(row)
-        tokens.append('NL')
-    
-    otsl_sequence = ' '.join(tokens)
-    
-    # # 디버깅을 위한 출력
-    # print("\nOTSL Grid (by rows):")
-    # print(f"Dimensions: {num_rows} rows x {num_cols} columns")
-    # rows = otsl_sequence.split('NL')
-    # for row in rows[:-1]:  # 마지막 빈 행 제외
-    #     print(row.strip())
-    
-    return otsl_sequence
+        # 1. 그리드 크기와 span 정보 수집
+        num_cols = 0
+        current_row = 0
+        current_col = 0
+        spans = {}
+        
+        i = 0
+        while i < len(html_tokens):
+            token = html_tokens[i]
+            
+            if token == '<tr>':
+                current_col = 0
+                
+            elif token == '</tr>':
+                current_row += 1
+                num_cols = max(num_cols, current_col)
+                
+            elif token == '<td' or token == '<td>':
+                colspan = 1
+                rowspan = 1
+                
+                if token == '<td':
+                    i += 1
+                    while i < len(html_tokens) and html_tokens[i] != '>':
+                        if 'colspan=' in html_tokens[i]:
+                            colspan = int(html_tokens[i].split('"')[1])
+                        elif 'rowspan=' in html_tokens[i]:
+                            rowspan = int(html_tokens[i].split('"')[1])
+                        i += 1
+                
+                spans[(current_row, current_col)] = (rowspan, colspan)
+                current_col += colspan
+            
+            i += 1
+        
+        num_rows = current_row + 1
+        
+        if num_rows == 0 or num_cols == 0:
+            raise ValueError(f"Invalid table dimensions: rows={num_rows}, cols={num_cols}")
+        
+        
+        grid = [[None] * num_cols for _ in range(num_rows)]
 
+        # 1단계: rowspan이 있는 셀들 먼저 처리
+        for (row, col), (rowspan, colspan) in spans.items():
+            if rowspan > 1:
+                # 시작 셀
+                grid[row][col] = 'C'
+                # 가로 방향 L 처리
+                for c in range(col + 1, col + colspan):
+                    grid[row][c] = 'L'
+                # 아래 방향 U 처리
+                for r in range(row + 1, row + rowspan):
+                    for c in range(col, col + colspan):  # col부터 시작 (수정)
+                        grid[r][c] = 'U'
+
+        # 2단계: 각 행의 colspan 처리
+        for row in range(num_rows):
+            # 각 행에서 왼쪽부터 처리
+            col = 0
+            while col < num_cols:
+                if grid[row][col] == 'U':  # U로 이미 설정된 셀은 건너뛰기
+                    col += 1
+                    continue
+                    
+                # 현재 위치의 span 정보 찾기
+                span_info = next((span for (r, c), span in spans.items() 
+                                if r == row and c == col), None)
+                
+                if span_info and span_info[1] > 1:  # colspan이 있는 경우
+                    grid[row][col] = 'C'
+                    for c in range(col + 1, col + span_info[1]):
+                        if grid[row][c] != 'U':  # U가 아닌 경우만 L로 설정
+                            grid[row][c] = 'L'
+                    col += span_info[1]
+                else:
+                    col += 1
+                        
+       # 4. X 규칙 적용
+        for r in range(1, num_rows):
+            for c in range(1, num_cols):
+                if grid[r][c] in ['U']:  # U 셀이고 첫 행/열이 아님
+                    left_neighbor = grid[r][c-1]
+                    upper_neighbor = grid[r-1][c]
+                        
+                    # X 변환 조건 체크
+                    if left_neighbor in ['U', 'X'] and upper_neighbor in ['L', 'X']:
+                        grid[r][c] = 'X'
+        
+        for r in range(num_rows):
+            for c in range(num_cols):
+                if grid[r][c] is None:
+                    grid[r][c] = 'C'
+        
+        # 5. OTSL 시퀀스 생성
+        otsl_tokens = []
+        for row in grid:
+            otsl_tokens.extend(row)
+            otsl_tokens.append('NL')
+        
+        return " ".join(otsl_tokens)
+        
+    except Exception as e:
+        # print(f"Error converting HTML to OTSL: {str(e)}")
+        # print(f"HTML tokens: {html_tokens}")
+        # raise ValueError("Invalid OTSL syntax")
+        return None
+    
 def construct_table_html(
     otsl_sequence: str,
     text_regions: List[Dict[str, Union[str, List[float]]]],
@@ -395,7 +382,6 @@ def construct_table_html(
     except Exception as e:
         return f"<table><tr><td>Error: {str(e)}</td></tr></table>"
     
-    return '\n'.join(html)
 
 class CustomJSONEncoder(json.JSONEncoder):
     """텐서와 넘파이 배열을 JSON으로 직렬화하기 위한 인코더"""
