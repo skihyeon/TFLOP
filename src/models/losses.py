@@ -134,9 +134,7 @@ class TFLOPLoss(nn.Module):
         spans: torch.Tensor,        # (B, N, N)
         direction: str = 'row'
     ) -> torch.Tensor:
-        """Span-aware Contrastive Loss (논문 Equation 4, 5, 6)
-        Lcontr,j = -1/cp(j) * Σ(p∈P(j)) cp(j)log(exp(b̂j·b̂p/τ)/Σ(a∈A(j))exp(b̂j·b̂a/τ))
-        """
+        """Span-aware Contrastive Loss (논문 Equation 4, 5, 6)"""
         B, N, D = features.size()
         
         # Project features (Equation 4)
@@ -144,45 +142,26 @@ class TFLOPLoss(nn.Module):
         proj_features = F.normalize(proj_features, dim=-1)
         
         # Compute similarity matrix
-        sim_matrix = torch.matmul(proj_features, proj_features.transpose(-2, -1)) / self.temperature  # (B, N, N)
+        sim_matrix = torch.matmul(proj_features, proj_features.transpose(-2, -1)) / self.temperature
         
         # Compute span coefficients (Equation 6)
-        span_overlap = torch.matmul(spans, spans.transpose(-2, -1))  # (B, N, N)
-        span_sizes = torch.sum(spans, dim=-1, keepdim=True)  # (B, N, 1)
+        span_overlap = torch.matmul(spans, spans.transpose(-2, -1))  # overlap(p,j)
+        span_sizes = torch.sum(spans, dim=-1, keepdim=True)  # span()
         span_coef = span_overlap / (span_sizes * span_sizes.transpose(-2, -1) + 1e-8)  # cp(j)
         
-        # Mask for valid pairs (exclude self)
-        mask = ~torch.eye(N, dtype=torch.bool, device=features.device).unsqueeze(0)  # (1, N, N)
-        mask = mask.expand(B, -1, -1)  # (B, N, N)
-        
         # Compute positive and negative masks
-        positive_mask = (span_coef > 0) & mask  # P(j)
-        negative_mask = mask & ~positive_mask   # A(j)
+        mask = ~torch.eye(N, dtype=torch.bool, device=features.device).unsqueeze(0)
+        positive_mask = (span_coef > 0) & mask
+        negative_mask = mask & ~positive_mask
         
-        # Compute log probabilities
-        exp_sim = torch.exp(sim_matrix)  # (B, N, N)
+        # Compute loss (Equation 5)
+        exp_sim = torch.exp(sim_matrix)
+        denominator = torch.sum(exp_sim * negative_mask.float(), dim=-1, keepdim=True) + 1e-8
         
-        # Denominator: Σ(a∈A(j))exp(b̂j·b̂a/τ)
-        denominator = torch.sum(
-            exp_sim * negative_mask.float(),
-            dim=-1,
-            keepdim=True
-        ) + 1e-8
+        loss = -(span_coef * (sim_matrix - torch.log(denominator)) * positive_mask.float())
+        loss = loss.sum(dim=-1) / (positive_mask.float().sum(dim=-1) + 1e-8)
         
-        # Compute loss for each positive pair
-        log_prob = sim_matrix - torch.log(denominator)  # (B, N, N)
-        
-        # Apply span coefficients and positive mask
-        loss = -(span_coef * log_prob * positive_mask.float())  # (B, N, N)
-        
-        # Normalize by number of positive pairs per box
-        num_positives = positive_mask.float().sum(dim=-1)  # (B, N)
-        loss = loss.sum(dim=-1) / (num_positives + 1e-8)  # (B, N)
-        
-        # Average over boxes and batch
-        loss = loss.mean()
-        
-        return loss
+        return loss.mean()
 
     def forward(
         self,
