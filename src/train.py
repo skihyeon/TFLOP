@@ -112,5 +112,7 @@ def main():
         trainer.fit(model, datamodule=datamodule)
 
 if __name__ == '__main__':
+    from setproctitle import setproctitle
+    setproctitle("TFLOP")
     torch.set_float32_matmul_precision('high')
     main()
