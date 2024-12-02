@@ -4,7 +4,7 @@ from typing import Dict, Any
 from .tflop import TFLOP
 from .losses import TFLOPLoss
 from metrics.teds import compute_teds, compute_teds_struct
-from utils.util import construct_table_html
+from utils.util import construct_table_html_pred, construct_table_html_gt
 
 class TFLOPLightningModule(pl.LightningModule):
     def __init__(self, model_config: Any, train_config: Any, inference_mode: bool = False):
@@ -21,30 +21,29 @@ class TFLOPLightningModule(pl.LightningModule):
             lambda_ptr=model_config.lambda_ptr,
             lambda_empty_ptr=model_config.lambda_empty_ptr,
             lambda_row_contr=model_config.lambda_row_contr,
-            lambda_col_contr=model_config.lambda_col_contr
+            lambda_col_contr=model_config.lambda_col_contr,
+            tokenizer=self.model.tokenizer
         )
         
     def forward(self, batch):
         # 키 이름 변환
-        model_inputs = {
-            'images': batch['images'],
-            'text_regions': batch['bboxes'],  # bboxes -> text_regions
-            'labels': batch.get('tokens', None),
-            'attention_mask': batch.get('attention_mask', None),
-            'row_span_coef': batch.get('row_span_coef', None),
-            'col_span_coef': batch.get('col_span_coef', None),
-            'data_tag_mask': batch.get('data_tag_mask', None),
-            'box_indices': batch.get('box_indices', None),
-            'cells': batch.get('cells', None),
-            'html': batch.get('html', None)
-        }
+        # model_inputs = {
+        #     'images': batch['images'],
+        #     'text_regions': batch['bboxes'],  # bboxes -> text_regions
+        #     'labels': batch.get('tokens', None),
+        #     'attention_mask': batch.get('attention_mask', None),
+        #     'row_span_coef': batch.get('row_span_coef', None),
+        #     'col_span_coef': batch.get('col_span_coef', None),
+        #     'data_tag_mask': batch.get('data_tag_mask', None),
+        #     'box_indices': batch.get('box_indices', None),
+        #     'cells': batch.get('cells', None),
+        #     'html': batch.get('html', None)
+        # }
         return self.model(batch)
         
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         outputs = self(batch)
         batch_size = batch['images'].size(0)
-        batch['empty_mask'] = (batch['tokens'] == self.model.tokenizer.pad_token_id)
-            
         loss_dict = self.criterion(batch, outputs)
         
         # step 단위로만 로깅
@@ -52,16 +51,15 @@ class TFLOPLightningModule(pl.LightningModule):
             self.log(f"train/{name}", value, 
                     batch_size=batch_size,
                     on_step=True,
-                    on_epoch=False,  # epoch 로깅 비활성화
-                    prog_bar=(name == 'loss'))
+                    on_epoch=False,  # epoch 로�� 비활성화
+                    prog_bar=(name == 'loss')
+                    )
         
         return loss_dict
     
     def validation_step(self, batch, batch_idx):
         outputs = self(batch)
         batch_size = batch['images'].size(0)
-        batch['empty_mask'] = (batch['tokens'] == self.model.tokenizer.pad_token_id)
-            
         loss_dict = self.criterion(batch, outputs)  
         
         # 1. Loss 로깅 - 메트릭 이름에서 _step 제거
@@ -87,17 +85,15 @@ class TFLOPLightningModule(pl.LightningModule):
             
             try:
                 # 예측 HTML 생성
-                pred_html = construct_table_html(
+                pred_html = construct_table_html_pred(
                     pred_otsl,
                     text_regions,
                     outputs['pointer_logits'][0]
                 )
                 
                 # Ground Truth HTML 생성 (text 정보 포함)
-                true_html = construct_table_html(
-                    true_otsl,
-                    text_regions,
-                    None  # pointer_logits는 필요 없음 (GT는 이미 정렬되어 있음)
+                true_html = construct_table_html_gt(
+                    batch['html'][0]
                 )
             except ValueError as e:
                 print(f"Warning: Failed to construct HTML: {str(e)}")

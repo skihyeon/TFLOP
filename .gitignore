@@ -11,3 +11,5 @@ src/lightning_logs
 src/wandb
 src/debugs
 *.html
+*.png
+*.jpg

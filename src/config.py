@@ -54,13 +54,13 @@ class TrainingConfig:
     
     # Training
     total_steps: int = 100000
-    eval_steps: int = 1000
-    save_steps: int = 2000
+    eval_steps: int = 5000
+    save_steps: int = 5000
     checkpoint_dir: str = "./checkpoints"
     
     batch_size: int = 8
-    gradient_accumulation_steps: int = 1
-    learning_rate: float = 1e-4
+    gradient_accumulation_steps: int = 8
+    learning_rate: float = 1e-3
     # weight_decay: float = 0.05
     warmup_steps: int = 0
     

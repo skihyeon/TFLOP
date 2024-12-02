@@ -36,10 +36,11 @@ def main():
         ModelCheckpoint(
             dirpath=exp_dir / "checkpoints",
             filename=f'{train_config.exp_name}'+'_{step}',
-            save_top_k=3,
-            monitor='val/loss',
+            save_top_k=-1,
+            # monitor='val/loss',
+            monitor = None,
             mode='min',
-            every_n_train_steps=train_config.save_steps if train_config.save_steps > 0 else None,
+            every_n_train_steps=train_config.save_steps,
         ),
         ValidationVisualizationCallback(viz_dir=exp_dir / "visualizations")
     ]

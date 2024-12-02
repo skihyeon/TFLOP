@@ -118,21 +118,43 @@ def visualize_validation_sample(
                             x1, y1, x2, y2 = ref_box
                             
                             # 화살표 스타일 설정
-                            arrow_style = patches.ArrowStyle('->', head_length=10, head_width=7)
+                            arrow_style = patches.ArrowStyle('->', head_length=8, head_width=5)
                             color = 'blue' if token == 'L' else 'green' if token == 'U' else 'orange'
+                            
+                            # 화살표 시작점과 끝점 계산
+                            cell_width = (x2 - x1) * W
+                            cell_height = (y2 - y1) * H
+                            
+                            if token == 'L':  # 오른쪽으로
+                                start = (x2 * W, (y1 + y2) * H / 2)
+                                end = (x2 * W + cell_width * 0.5, (y1 + y2) * H / 2)
+                                connection_style = "arc3,rad=0.0"
+                                text_pos = (end[0] + 5, end[1])
+                            elif token == 'U':  # 아래로
+                                start = ((x1 + x2) * W / 2, y2 * H)
+                                end = ((x1 + x2) * W / 2, y2 * H + cell_height * 0.5)
+                                connection_style = "arc3,rad=0.0"
+                                text_pos = (start[0] + 5, end[1])
+                            else:  # X - 대각선 오른쪽 아래로
+                                start = (x2 * W, y2 * H)
+                                end = (x2 * W + cell_width * 0.4, y2 * H + cell_height * 0.4)
+                                connection_style = "arc3,rad=0.2"
+                                text_pos = (end[0] + 5, end[1])
                             
                             # 화살표 그리기
                             arrow = patches.FancyArrowPatch(
-                                (x2 * W, y1 * H),  # 시작점
-                                (x2 * W + 30, y1 * H),  # 끝점
+                                start,
+                                end,
                                 arrowstyle=arrow_style,
                                 color=color,
-                                alpha=0.7
+                                alpha=0.7,
+                                connectionstyle=connection_style,
+                                linewidth=1.5
                             )
                             ax.add_patch(arrow)
                             
                             # span 정보 표시
-                            ax.text(x2 * W + 35, y1 * H, 
+                            ax.text(text_pos[0], text_pos[1], 
                                     f"({i},{j})\n{token}", 
                                     color='black', fontsize=5,
                                     bbox=dict(facecolor=color, alpha=0.3, pad=0.2))

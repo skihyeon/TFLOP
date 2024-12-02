@@ -9,7 +9,7 @@ from .layout_encoder import LayoutEncoder
 from .layout_pointer import LayoutPointer
 from .otsl_tokenizer import OTSLTokenizer
 import torch.nn.functional as F
-from utils.util import compute_span_coefficients
+from utils.util import get_coef_matrix
 
 class TFLOP(nn.Module):
     """
@@ -79,7 +79,10 @@ class TFLOP(nn.Module):
         
         # Span projection
         self.span_proj = nn.Linear(config.feature_dim, config.feature_dim)
-        self.temperature = config.temperature
+        
+        # Row와 Column을 위한 별도의 projection layers
+        self.row_span_proj = nn.Linear(config.feature_dim, config.feature_dim)
+        self.col_span_proj = nn.Linear(config.feature_dim, config.feature_dim)
 
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         """Forward pass"""
@@ -88,19 +91,18 @@ class TFLOP(nn.Module):
         text_regions: torch.Tensor = batch['bboxes']     # (B, N, 4) - normalized bboxes
         labels: Optional[torch.Tensor] = batch['tokens']  # (B, L)
         attention_mask: Optional[torch.Tensor] = batch['attention_mask']  # (B, L)
-        row_span_coef: Optional[torch.Tensor] = batch['row_span_coef']  # (B, N, N)
-        col_span_coef: Optional[torch.Tensor] = batch['col_span_coef']   # (B, N, N)
-        data_tag_mask: Optional[torch.Tensor] = batch['data_tag_mask']  # (B, T)
+        data_tag_mask: Optional[torch.Tensor] = batch['data_tag_mask']  # (B, L)
+        empty_mask: Optional[torch.Tensor] = batch['empty_mask']  # (B, L)
         
         B = images.size(0)
-        N = text_regions.size(1)
+        N = text_regions.size(1)  # 실제 bbox 수
         
         # 1. Image Encoding (논문 3.2)
-        visual_features = self.image_encoder(images).last_hidden_state  # {zi}
-        visual_features = self.visual_proj(visual_features)
+        visual_features = self.image_encoder(images).last_hidden_state  # (B, P, D)
+        visual_features = self.visual_proj(visual_features)  # (B, P, D)
         
         # 2. Layout Encoding (논문 3.3)
-        layout_embedding = self.layout_encoder(text_regions, visual_features)  # {lj}
+        layout_embedding = self.layout_encoder(text_regions, visual_features)  # (B, N, D)
         
         # 3. Logical Structure Generation (논문 3.4)
         encoder_outputs = BaseModelOutput(
@@ -146,27 +148,28 @@ class TFLOP(nn.Module):
             
             tag_logits = decoder_outputs.logits.contiguous()
             last_hidden_state = decoder_outputs.decoder_hidden_states[-1].contiguous()
+            
         
-        else:
-            # Final Inference: generate 사용
-            decoder_outputs = self.structure_decoder.generate(
-                encoder_outputs=encoder_outputs.last_hidden_state,
-                attention_mask=encoder_attention_mask,
-                max_length=self.config.max_seq_length,
-                num_beams=4,
-                early_stopping=True,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-                bos_token_id=self.tokenizer.bos_token_id,
-                use_cache=True,
-                output_hidden_states=True,
-                return_dict_in_generate=True,
-                output_scores=True
-            )
-            return {
-                'sequences': decoder_outputs.sequences,
-                'scores': decoder_outputs.scores
-            }
+        # else:
+        #     # Final Inference: generate 사용
+        #     decoder_outputs = self.structure_decoder.generate(
+        #         encoder_outputs=encoder_outputs.last_hidden_state,
+        #         attention_mask=encoder_attention_mask,
+        #         max_length=self.config.max_seq_length,
+        #         num_beams=4,
+        #         early_stopping=True,
+        #         pad_token_id=self.tokenizer.pad_token_id,
+        #         eos_token_id=self.tokenizer.eos_token_id,
+        #         bos_token_id=self.tokenizer.bos_token_id,
+        #         use_cache=True,
+        #         output_hidden_states=True,
+        #         return_dict_in_generate=True,
+        #         output_scores=True
+        #     )
+        #     return {
+        #         'sequences': decoder_outputs.sequences,
+        #         'scores': decoder_outputs.scores
+        #     }
         
         # 4. Layout Pointing (논문 3.5)
         # last_hidden_state에는 text_regions 정보가 포함되어 있어야 함
@@ -178,38 +181,114 @@ class TFLOP(nn.Module):
         pointer_logits, empty_logits = self.layout_pointer(
             decoder_hidden_states=last_hidden_state,
             num_boxes=N,
-            data_tag_mask=data_tag_mask
+            data_tag_mask=data_tag_mask,
+            empty_mask=empty_mask
         )
+        
+        # Span-aware contrastive learning을 위한 similarity matrix 계산
+        row_sim_matrix, col_sim_matrix = self.get_sim_matrix(layout_embedding)
+        
+        # Span coefficient 계산 (OTSL 토큰으로부터)
+        row_span_coef, col_span_coef = get_coef_matrix(batch['tokens'], self.tokenizer, batch['box_indices'], N)
+        
+        # 디버깅 정보를 파일에 저장
+        with open('matrices_debug.txt', 'w') as f:
+            f.write("=== Debugging Information ===\n\n")
+            
+            # 1. Shape 정보
+            f.write("Shape Information:\n")
+            f.write(f"layout_embedding: {layout_embedding.shape}\n")
+            f.write(f"row_sim_matrix: {row_sim_matrix.shape}\n")
+            f.write(f"col_sim_matrix: {col_sim_matrix.shape}\n")
+            f.write(f"row_span_coef: {row_span_coef.shape}\n")
+            f.write(f"col_span_coef: {col_span_coef.shape}\n\n")
+            
+            # 2. 값 범위 통계
+            f.write("Value Statistics:\n")
+            f.write("Row Similarity Matrix:\n")
+            f.write(f"  - min: {row_sim_matrix.min().item():.4f}\n")
+            f.write(f"  - max: {row_sim_matrix.max().item():.4f}\n")
+            f.write(f"  - mean: {row_sim_matrix.mean().item():.4f}\n")
+            f.write(f"  - std: {row_sim_matrix.std().item():.4f}\n")
+            f.write(f"  - non-zero elements: {(row_sim_matrix != 0).sum().item()}\n\n")
+            
+            f.write("Column Similarity Matrix:\n")
+            f.write(f"  - min: {col_sim_matrix.min().item():.4f}\n")
+            f.write(f"  - max: {col_sim_matrix.max().item():.4f}\n")
+            f.write(f"  - mean: {col_sim_matrix.mean().item():.4f}\n")
+            f.write(f"  - std: {col_sim_matrix.std().item():.4f}\n")
+            f.write(f"  - non-zero elements: {(col_sim_matrix != 0).sum().item()}\n\n")
+            
+            f.write("Row Span Coefficient:\n")
+            f.write(f"  - min: {row_span_coef.min().item():.4f}\n")
+            f.write(f"  - max: {row_span_coef.max().item():.4f}\n")
+            f.write(f"  - mean: {row_span_coef.mean().item():.4f}\n")
+            f.write(f"  - std: {row_span_coef.std().item():.4f}\n")
+            f.write(f"  - non-zero elements: {(row_span_coef != 0).sum().item()}\n\n")
+            
+            f.write("Column Span Coefficient:\n")
+            f.write(f"  - min: {col_span_coef.min().item():.4f}\n")
+            f.write(f"  - max: {col_span_coef.max().item():.4f}\n")
+            f.write(f"  - mean: {col_span_coef.mean().item():.4f}\n")
+            f.write(f"  - std: {col_span_coef.std().item():.4f}\n")
+            f.write(f"  - non-zero elements: {(col_span_coef != 0).sum().item()}\n\n")
+            
+            # 3. OTSL 토큰과 box indices 정보
+            f.write("OTSL and Box Indices Info:\n")
+            f.write(f"Number of boxes (N): {N}\n")
+            f.write(f"Box indices shape: {batch['box_indices'].shape}\n")
+            f.write(f"Box indices sample: {batch['box_indices'][0].tolist()[:10]}\n")
+            
+            # 첫 번째 샘플의 OTSL 토큰 출력
+            tokens = [self.tokenizer.id2token[tid.item()] for tid in batch['tokens'][0] if tid.item() in self.tokenizer.id2token]
+            f.write(f"OTSL tokens sample: {' '.join(tokens[:tokens.index('[EOS]')])}...\n\n")
+            
+            # 4. 실제 행렬 값 샘플 (첫 번째 배치의 5x5 부분)
+            f.write("Matrix Values Sample (5x5):\n")
+            f.write("Row Similarity Matrix:\n")
+            f.write(f"{row_sim_matrix[0, :5, :5]}\n\n")
+            f.write("Row Span Coefficient:\n")
+            f.write(f"{row_span_coef[0, :5, :5]}\n\n")
+            
+            f.write("Column Similarity Matrix:\n")
+            f.write(f"{col_sim_matrix[0, :5, :5]}\n\n")
+            f.write("Column Span Coefficient:\n")
+            f.write(f"{col_span_coef[0, :5, :5]}\n\n")
         
         # 5. Return outputs for loss calculation
         outputs = {
-            'tag_logits': tag_logits,                # (B, L, V)
-            'box_features': layout_embedding,        # (B, N, D)
-            'tag_features': last_hidden_state[:, N:],  # (B, L, D)
-            'pointer_logits': pointer_logits,        # (B, N, T)
-            'empty_logits': empty_logits,           # (B, T)
-            'data_tag_mask': data_tag_mask          # (B, T)
+            'tag_logits': tag_logits,                # (B, L, V) - V는 vocab size
+            'box_features': layout_embedding,         # (B, N, D) - N은 실제 bbox 수
+            'tag_features': last_hidden_state[:, N:], # (B, L, D)
+            'pointer_logits': pointer_logits,         # (B, N, L) - bbox와 token 간의 관계
+            'empty_logits': empty_logits,            # (B, L) - empty cell 예측
+            'data_tag_mask': data_tag_mask,          # (B, L) - 'C' 토큰의 위치
+            'row_sim_matrix': row_sim_matrix,        # (B, N, N) - bbox 간의 row-wise similarity
+            'col_sim_matrix': col_sim_matrix,        # (B, N, N) - bbox 간의 column-wise similarity
+            'row_span_coef': row_span_coef,          # (B, N, N) - bbox 간의 row-wise span coefficient
+            'col_span_coef': col_span_coef           # (B, N, N) - bbox 간의 column-wise span coefficient
         }
         
-        # Span-aware contrastive features 계산
-        if row_span_coef is not None:
-            # Row-wise contrastive features
-            row_projected_features = self.span_proj(layout_embedding)  # (B, N, D)
-            row_projected_features = F.normalize(row_projected_features, dim=-1)
-            row_sim_matrix = torch.matmul(row_projected_features, row_projected_features.transpose(-2, -1)) / self.temperature
-
-            outputs.update({
-                'row_sim_matrix': row_sim_matrix,  # (B, N, N)
-            })
-        
-        if col_span_coef is not None:
-            # Column-wise contrastive features
-            col_projected_features = self.span_proj(layout_embedding)  # (B, N, D)
-            col_projected_features = F.normalize(col_projected_features, dim=-1)
-            col_sim_matrix = torch.matmul(col_projected_features, col_projected_features.transpose(-2, -1)) / self.temperature
-            
-            outputs.update({
-                'col_sim_matrix': col_sim_matrix,  # (B, N, N)
-            })
-        
         return outputs
+
+    def get_sim_matrix(self, layout_embedding: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute similarity matrices for row-wise and column-wise contrastive learning"""
+        # 1. Project layout embeddings with different projections (Equation 4)
+        row_projected_features = self.row_span_proj(layout_embedding)  # (B, N, D)
+        col_projected_features = self.col_span_proj(layout_embedding)  # (B, N, D)
+        
+        # 2. Compute similarity matrices (dot product)
+        row_sim_matrix = torch.matmul(
+            row_projected_features, 
+            row_projected_features.transpose(-2, -1)
+        ) # (B, N, N)
+        
+        col_sim_matrix = torch.matmul(
+            col_projected_features, 
+            col_projected_features.transpose(-2, -1)
+        )  # (B, N, N)
+        
+        row_sim_matrix = F.normalize(row_sim_matrix, dim=-1)
+        col_sim_matrix = F.normalize(col_sim_matrix, dim=-1)
+        
+        return row_sim_matrix, col_sim_matrix
