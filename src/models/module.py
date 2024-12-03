@@ -46,13 +46,24 @@ class TFLOPLightningModule(pl.LightningModule):
         batch_size = batch['images'].size(0)
         loss_dict = self.criterion(batch, outputs)
         
-        # step 단위로만 로깅
         for name, value in loss_dict.items():
-            self.log(f"train/{name}", value, 
+            # self.log(f"train/{name}", value, 
+            #         batch_size=batch_size,
+            #         on_step=True,
+            #         on_epoch=False,  # epoch 로�� 비활성화
+            #         prog_bar=(name == 'loss')
+            #         )
+            if name == 'loss': name = 'l'
+            elif name == 'cls_loss': name = 'cls'
+            elif name == 'ptr_loss': name = 'p'
+            elif name == 'empty_ptr_loss': name = 'e'
+            elif name == 'row_contr_loss': name = 'r'
+            elif name == 'col_contr_loss': name = 'c'
+            self.log(f"{name}", value,
                     batch_size=batch_size,
                     on_step=True,
-                    on_epoch=False,  # epoch 로�� 비활성화
-                    prog_bar=(name == 'loss')
+                    on_epoch=False,  # epoch 로깅 비활성화
+                    prog_bar=True
                     )
         
         return loss_dict

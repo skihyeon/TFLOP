@@ -193,6 +193,8 @@ class OTSLTokenizer:
         
         # 1. Tokenize
         tokens = text.split()
+        if len(tokens) == 0 or len(tokens) > max_length:
+            raise ValueError("Invalid OTSL sequence length")
         
         # 2. Validate syntax
         if not self.validate_syntax(tokens):
@@ -231,7 +233,8 @@ class OTSLTokenizer:
         special_token_ids = {
             self.bos_token_id,
             self.eos_token_id,
-            self.pad_token_id
+            self.pad_token_id,
+            self.unk_token_id
         }
         
         for token_id in token_ids:
@@ -264,47 +267,3 @@ class OTSLTokenizer:
             otsl_tokens.extend(current_row)
         
         return ' '.join(otsl_tokens)
-    
-    def convert_html_to_otsl(self, html: str) -> str:
-        """HTML을 OTSL로 변환"""
-        # 1. 기본 테이블 태그 제거
-        html = html.replace("<table>", "").replace("</table>", "")
-        html = html.replace("<tr>", "").replace("</tr>", " NL ")
-        
-        # 2. 셀 태그 변환
-        for otsl_tag, html_tag in self.html_mapping.items():
-            if otsl_tag != "NL":  # NL은 이미 처리됨
-                html = html.replace(html_tag, f" {otsl_tag} ")
-                html = html.replace(f"</{html_tag.split()[0][1:]}>", "")
-        
-        # 3. 연속된 공백 제거
-        html = re.sub(r'\s+', ' ', html).strip()
-        
-        # 4. 문법 검증
-        tokens = html.split()
-        if not self.validate_syntax(tokens):
-            raise ValueError("Generated OTSL sequence is invalid")
-        
-        return html
-    
-    def convert_otsl_to_html(self, otsl: str) -> str:
-        """OTSL을 HTML로 변환"""
-        # 1. 문법 검증
-        tokens = otsl.split()
-        if not self.validate_syntax(tokens):
-            raise ValueError("Invalid OTSL syntax")
-        
-        # 2. HTML 변환
-        html = ["<table><tr>"]
-        
-        for token in tokens:
-            if token == "NL":
-                html.append("</tr><tr>")
-            else:
-                html_tag = self.html_mapping[token]
-                closing_tag = f"</{html_tag.split()[0][1:]}>"
-                html.append(f"{html_tag}{closing_tag}")
-        
-        html.append("</tr></table>")
-        
-        return "".join(html)

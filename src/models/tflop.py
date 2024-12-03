@@ -29,35 +29,30 @@ class TFLOP(nn.Module):
             max_length=config.max_seq_length
         )
         
-        if not inference_mode:
-            # 학습 모드: pretrained 모델 로드
-            # self.image_encoder = SwinModel.from_pretrained(config.swin_model_name)
-            self.image_encoder = Swinv2Model.from_pretrained(config.swin_model_name)
-            # BART 설정 및 초기화
-            bart_config = BartConfig(
-                vocab_size=config.vocab_size,
-                max_position_embeddings=config.max_seq_length + 2,
-                d_model=config.feature_dim,
-                encoder_layers=config.encoder_layers,
-                decoder_layers=config.decoder_layers,
-                encoder_attention_heads=config.encoder_attention_heads,
-                decoder_attention_heads=config.decoder_attention_heads,
-                pad_token_id=self.tokenizer.pad_token_id,
-                bos_token_id=self.tokenizer.bos_token_id,
-                eos_token_id=self.tokenizer.eos_token_id,
-                is_encoder_decoder=True,
-                decoder_start_token_id=self.tokenizer.bos_token_id,
-                forced_eos_token_id=self.tokenizer.eos_token_id,
-                scale_embedding=True,
-                use_cache=True,
-            )
-            self.structure_decoder = BartForConditionalGeneration(bart_config)
-        else:
-            # 추론 모드: 빈 모델 생성 (가중치는 나중에 로드됨)
-            # self.image_encoder = SwinModel(self.image_encoder.config)
-            self.image_encoder = Swinv2Model(self.image_encoder.config)
-            self.structure_decoder = BartForConditionalGeneration(self.structure_decoder.config)
-        
+
+        # 학습 모드: pretrained 모델 로드
+        self.image_encoder = SwinModel.from_pretrained(config.swin_model_name)
+        # self.image_encoder = Swinv2Model.from_pretrained(config.swin_model_name)
+        # BART 설정 및 초기화
+        bart_config = BartConfig(
+            vocab_size=config.vocab_size,
+            max_position_embeddings=config.max_seq_length + 2,
+            d_model=config.feature_dim,
+            encoder_layers=config.encoder_layers,
+            decoder_layers=config.decoder_layers,
+            encoder_attention_heads=config.encoder_attention_heads,
+            decoder_attention_heads=config.decoder_attention_heads,
+            pad_token_id=self.tokenizer.pad_token_id,
+            bos_token_id=self.tokenizer.bos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+            is_encoder_decoder=True,
+            decoder_start_token_id=self.tokenizer.bos_token_id,
+            forced_eos_token_id=self.tokenizer.eos_token_id,
+            scale_embedding=True,
+            use_cache=True,
+        )
+        self.structure_decoder = BartForConditionalGeneration(bart_config)
+    
         # Visual feature projection
         self.visual_proj = nn.Linear(
             self.image_encoder.config.hidden_size,
@@ -74,7 +69,6 @@ class TFLOP(nn.Module):
         self.layout_pointer = LayoutPointer(
             feature_dim=config.feature_dim,
             temperature=config.temperature,
-            tokenizer=self.tokenizer
         )
         
         # Span projection
@@ -92,7 +86,6 @@ class TFLOP(nn.Module):
         labels: Optional[torch.Tensor] = batch['tokens']  # (B, L)
         attention_mask: Optional[torch.Tensor] = batch['attention_mask']  # (B, L)
         data_tag_mask: Optional[torch.Tensor] = batch['data_tag_mask']  # (B, L)
-        empty_mask: Optional[torch.Tensor] = batch['empty_mask']  # (B, L)
         
         B = images.size(0)
         N = text_regions.size(1)  # 실제 bbox 수
@@ -182,78 +175,83 @@ class TFLOP(nn.Module):
             decoder_hidden_states=last_hidden_state,
             num_boxes=N,
             data_tag_mask=data_tag_mask,
-            empty_mask=empty_mask
         )
         
         # Span-aware contrastive learning을 위한 similarity matrix 계산
         row_sim_matrix, col_sim_matrix = self.get_sim_matrix(layout_embedding)
         
         # Span coefficient 계산 (OTSL 토큰으로부터)
-        row_span_coef, col_span_coef = get_coef_matrix(batch['tokens'], self.tokenizer, batch['box_indices'], N)
+        # box_indices는 이제 (B, N, M) 형태이므로 flatten할 필요 없음
+        row_span_coef, col_span_coef = get_coef_matrix(
+            batch['tokens'], 
+            self.tokenizer, 
+            batch['box_indices'],  # (B, N, M)
+            N
+        )
         
         # 디버깅 정보를 파일에 저장
-        with open('matrices_debug.txt', 'w') as f:
-            f.write("=== Debugging Information ===\n\n")
+        # with open('matrices_debug.txt', 'w') as f:
+        #     f.write("=== Debugging Information ===\n\n")
             
-            # 1. Shape 정보
-            f.write("Shape Information:\n")
-            f.write(f"layout_embedding: {layout_embedding.shape}\n")
-            f.write(f"row_sim_matrix: {row_sim_matrix.shape}\n")
-            f.write(f"col_sim_matrix: {col_sim_matrix.shape}\n")
-            f.write(f"row_span_coef: {row_span_coef.shape}\n")
-            f.write(f"col_span_coef: {col_span_coef.shape}\n\n")
+        #     # 1. Shape 정보
+        #     f.write("Shape Information:\n")
+        #     f.write(f"layout_embedding: {layout_embedding.shape}\n")
+        #     f.write(f"row_sim_matrix: {row_sim_matrix.shape}\n")
+        #     f.write(f"col_sim_matrix: {col_sim_matrix.shape}\n")
+        #     f.write(f"row_span_coef: {row_span_coef.shape}\n")
+        #     f.write(f"col_span_coef: {col_span_coef.shape}\n\n")
             
-            # 2. 값 범위 통계
-            f.write("Value Statistics:\n")
-            f.write("Row Similarity Matrix:\n")
-            f.write(f"  - min: {row_sim_matrix.min().item():.4f}\n")
-            f.write(f"  - max: {row_sim_matrix.max().item():.4f}\n")
-            f.write(f"  - mean: {row_sim_matrix.mean().item():.4f}\n")
-            f.write(f"  - std: {row_sim_matrix.std().item():.4f}\n")
-            f.write(f"  - non-zero elements: {(row_sim_matrix != 0).sum().item()}\n\n")
+        #     # 2. 값 범위 통계
+        #     f.write("Value Statistics:\n")
+        #     f.write("Row Similarity Matrix:\n")
+        #     f.write(f"  - min: {row_sim_matrix.min().item():.4f}\n")
+        #     f.write(f"  - max: {row_sim_matrix.max().item():.4f}\n")
+        #     f.write(f"  - mean: {row_sim_matrix.mean().item():.4f}\n")
+        #     f.write(f"  - std: {row_sim_matrix.std().item():.4f}\n")
+        #     f.write(f"  - non-zero elements: {(row_sim_matrix != 0).sum().item()}\n\n")
             
-            f.write("Column Similarity Matrix:\n")
-            f.write(f"  - min: {col_sim_matrix.min().item():.4f}\n")
-            f.write(f"  - max: {col_sim_matrix.max().item():.4f}\n")
-            f.write(f"  - mean: {col_sim_matrix.mean().item():.4f}\n")
-            f.write(f"  - std: {col_sim_matrix.std().item():.4f}\n")
-            f.write(f"  - non-zero elements: {(col_sim_matrix != 0).sum().item()}\n\n")
+        #     f.write("Column Similarity Matrix:\n")
+        #     f.write(f"  - min: {col_sim_matrix.min().item():.4f}\n")
+        #     f.write(f"  - max: {col_sim_matrix.max().item():.4f}\n")
+        #     f.write(f"  - mean: {col_sim_matrix.mean().item():.4f}\n")
+        #     f.write(f"  - std: {col_sim_matrix.std().item():.4f}\n")
+        #     f.write(f"  - non-zero elements: {(col_sim_matrix != 0).sum().item()}\n\n")
             
-            f.write("Row Span Coefficient:\n")
-            f.write(f"  - min: {row_span_coef.min().item():.4f}\n")
-            f.write(f"  - max: {row_span_coef.max().item():.4f}\n")
-            f.write(f"  - mean: {row_span_coef.mean().item():.4f}\n")
-            f.write(f"  - std: {row_span_coef.std().item():.4f}\n")
-            f.write(f"  - non-zero elements: {(row_span_coef != 0).sum().item()}\n\n")
+        #     f.write("Row Span Coefficient:\n")
+        #     f.write(f"  - min: {row_span_coef.min().item():.4f}\n")
+        #     f.write(f"  - max: {row_span_coef.max().item():.4f}\n")
+        #     f.write(f"  - mean: {row_span_coef.mean().item():.4f}\n")
+        #     f.write(f"  - std: {row_span_coef.std().item():.4f}\n")
+        #     f.write(f"  - non-zero elements: {(row_span_coef != 0).sum().item()}\n\n")
             
-            f.write("Column Span Coefficient:\n")
-            f.write(f"  - min: {col_span_coef.min().item():.4f}\n")
-            f.write(f"  - max: {col_span_coef.max().item():.4f}\n")
-            f.write(f"  - mean: {col_span_coef.mean().item():.4f}\n")
-            f.write(f"  - std: {col_span_coef.std().item():.4f}\n")
-            f.write(f"  - non-zero elements: {(col_span_coef != 0).sum().item()}\n\n")
+        #     f.write("Column Span Coefficient:\n")
+        #     f.write(f"  - min: {col_span_coef.min().item():.4f}\n")
+        #     f.write(f"  - max: {col_span_coef.max().item():.4f}\n")
+        #     f.write(f"  - mean: {col_span_coef.mean().item():.4f}\n")
+        #     f.write(f"  - std: {col_span_coef.std().item():.4f}\n")
+        #     f.write(f"  - non-zero elements: {(col_span_coef != 0).sum().item()}\n\n")
             
-            # 3. OTSL 토큰과 box indices 정보
-            f.write("OTSL and Box Indices Info:\n")
-            f.write(f"Number of boxes (N): {N}\n")
-            f.write(f"Box indices shape: {batch['box_indices'].shape}\n")
-            f.write(f"Box indices sample: {batch['box_indices'][0].tolist()[:10]}\n")
+        #     # 3. OTSL 토큰과 box indices 정보
+        #     f.write("OTSL and Box Indices Info:\n")
+        #     f.write(f"Number of boxes (N): {N}\n")
+        #     f.write(f"Box indices shape: {batch['box_indices'].shape}\n")
+        #     f.write(f"Box indices sample: {batch['box_indices'][0].tolist()[:10]}\n")
             
-            # 첫 번째 샘플의 OTSL 토큰 출력
-            tokens = [self.tokenizer.id2token[tid.item()] for tid in batch['tokens'][0] if tid.item() in self.tokenizer.id2token]
-            f.write(f"OTSL tokens sample: {' '.join(tokens[:tokens.index('[EOS]')])}...\n\n")
+        #     # 첫 번째 샘플의 OTSL 토큰 출력
+        #     tokens = [self.tokenizer.id2token[tid.item()] for tid in batch['tokens'][0] if tid.item() in self.tokenizer.id2token]
+        #     f.write(f"OTSL tokens sample: {' '.join(tokens[:tokens.index('[EOS]')])}...\n\n")
             
-            # 4. 실제 행렬 값 샘플 (첫 번째 배치의 5x5 부분)
-            f.write("Matrix Values Sample (5x5):\n")
-            f.write("Row Similarity Matrix:\n")
-            f.write(f"{row_sim_matrix[0, :5, :5]}\n\n")
-            f.write("Row Span Coefficient:\n")
-            f.write(f"{row_span_coef[0, :5, :5]}\n\n")
+        #     # 4. 실제 행렬 값 샘플 (첫 번째 배치의 5x5 부분)
+        #     f.write("Matrix Values Sample (5x5):\n")
+        #     f.write("Row Similarity Matrix:\n")
+        #     f.write(f"{row_sim_matrix[0, :5, :5]}\n\n")
+        #     f.write("Row Span Coefficient:\n")
+        #     f.write(f"{row_span_coef[0, :5, :5]}\n\n")
             
-            f.write("Column Similarity Matrix:\n")
-            f.write(f"{col_sim_matrix[0, :5, :5]}\n\n")
-            f.write("Column Span Coefficient:\n")
-            f.write(f"{col_span_coef[0, :5, :5]}\n\n")
+        #     f.write("Column Similarity Matrix:\n")
+        #     f.write(f"{col_sim_matrix[0, :5, :5]}\n\n")
+        #     f.write("Column Span Coefficient:\n")
+        #     f.write(f"{col_span_coef[0, :5, :5]}\n\n")
         
         # 5. Return outputs for loss calculation
         outputs = {

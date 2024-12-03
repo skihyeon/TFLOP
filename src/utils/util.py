@@ -110,13 +110,27 @@ def extract_spans_from_html(html_structure: Dict) -> Tuple[List[Dict], np.ndarra
     
     return processed_cells, row_span_matrix, col_span_matrix
 
-def convert_html_to_otsl(ann: Dict) -> str:
+def convert_html_to_otsl(ann: Dict) -> Tuple[str, List[bool]]:
+    """HTML 구조를 OTSL로 변환하고 데이터 존재 여부를 반환
+    
+    Args:
+        ann: PubTabNet annotation 딕셔너리
+        
+    Returns:
+        otsl_sequence: OTSL 토큰 시퀀스
+        has_data_1D_list: 각 셀의 데이터 존재 여부 (1D 리스트)
+    """
     try:
         html_tokens = ann['html']['structure']['tokens']
+        cells = ann['html']['cells']
+        
+        # cells의 데이터 존재 여부 미리 계산
+        has_content = [len(cell['tokens']) > 0 for cell in cells]
+        current_cell_idx = 0
         
         # 1. 그리드 크기와 span 정보 수집
         num_cols = 0
-        current_row = 0
+        current_row = -1
         current_col = 0
         spans = {}  # (row, col) -> (rowspan, colspan)
         active_rowspans = {}  # col -> (start_row, rowspan)
@@ -126,6 +140,7 @@ def convert_html_to_otsl(ann: Dict) -> str:
             token = html_tokens[i]
             
             if token == '<tr>':
+                current_row += 1
                 current_col = 0
                 # 현재 행에서 활성화된 rowspan 확인
                 for col in range(num_cols):
@@ -135,7 +150,6 @@ def convert_html_to_otsl(ann: Dict) -> str:
                             del active_rowspans[col]
                 
             elif token == '</tr>':
-                current_row += 1
                 num_cols = max(num_cols, current_col)
                 
             elif token == '<td' or token == '<td>':
@@ -145,7 +159,7 @@ def convert_html_to_otsl(ann: Dict) -> str:
                     if current_row < start_row + rowspan:
                         current_col += 1
                     else:
-                        del active_rowspans[current_col]
+                        del active_rowspans[col]
                 
                 colspan = 1
                 rowspan = 1
@@ -159,8 +173,11 @@ def convert_html_to_otsl(ann: Dict) -> str:
                             rowspan = int(html_tokens[i].split('"')[1])
                         i += 1
                 
-                # 현재 셀의 span 정보 저장
-                spans[(current_row, current_col)] = (rowspan, colspan)
+                # 현재 셀의 span 정보와 데이터 존재 여부 저장
+                spans[(current_row, current_col)] = (rowspan, colspan, 
+                    has_content[current_cell_idx] if current_cell_idx < len(has_content) else False)
+                current_cell_idx += 1
+                
                 if rowspan > 1:
                     for c in range(current_col, current_col + colspan):
                         active_rowspans[c] = (current_row, rowspan)
@@ -172,6 +189,7 @@ def convert_html_to_otsl(ann: Dict) -> str:
         
         # 2. 그리드 생성 및 OTSL 토큰 채우기
         grid = [[None] * num_cols for _ in range(num_rows)]
+        has_data = [[False] * num_cols for _ in range(num_rows)]
         
         # 각 행과 열을 순회하면서 OTSL 토큰 결정
         for row in range(num_rows):
@@ -184,7 +202,7 @@ def convert_html_to_otsl(ann: Dict) -> str:
                 if row > 0:
                     for r in range(row-1, -1, -1):
                         if (r, col) in spans:
-                            rowspan, _ = spans[(r, col)]
+                            rowspan, _, _ = spans[(r, col)]
                             if row < r + rowspan:
                                 is_under_rowspan = True
                                 grid[row][col] = 'U'
@@ -196,7 +214,8 @@ def convert_html_to_otsl(ann: Dict) -> str:
                 # 현재 위치에 새로운 셀이 있는 경우
                 if (row, col) in spans:
                     grid[row][col] = 'C'
-                    rowspan, colspan = spans[(row, col)]
+                    rowspan, colspan, has_content = spans[(row, col)]
+                    has_data[row][col] = has_content
                     
                     # colspan 처리
                     for c in range(col + 1, col + colspan):
@@ -205,6 +224,7 @@ def convert_html_to_otsl(ann: Dict) -> str:
                 # 빈 셀 처리
                 elif grid[row][col] is None:
                     grid[row][col] = 'C'
+                    has_data[row][col] = False
         
         # 3. OTSL 시퀀스 생성
         otsl_tokens = []
@@ -212,7 +232,12 @@ def convert_html_to_otsl(ann: Dict) -> str:
             otsl_tokens.extend(token for token in row if token is not None)
             otsl_tokens.append('NL')
         
-        return " ".join(otsl_tokens)
+        has_data_1D_list = []
+        for row in has_data:
+            row.append(False)  # NL 토큰에 대한 has_data
+            has_data_1D_list.extend(row)
+        
+        return " ".join(otsl_tokens), has_data_1D_list
         
     except Exception as e:
         print(f"Error converting HTML to OTSL: {str(e)}")
@@ -406,150 +431,237 @@ def construct_table_html_pred(
     except Exception as e:
         print(f"Error constructing pred HTML: {str(e)}")
         return f"<table><tr><td>Error: {str(e)}</td></tr></table>"
-    
+
 def extract_spans_from_otsl(otsl_tokens: List[int], tokenizer: OTSLTokenizer) -> Tuple[np.ndarray, np.ndarray]:
     """OTSL 토큰에서 span matrix 추출"""
-    # 1. OTSL 토큰을 그리드로 변환
-    tokens = []
-    for token_id in otsl_tokens:
-        if token_id in tokenizer.id2token:
-            token = tokenizer.id2token[token_id]
-            if token not in ['[BOS]', '[EOS]', '[PAD]']:
-                tokens.append(token)
+    try:
+        # 1. OTSL 토큰을 그리드로 변환
+        tokens = []
+        for token_id in otsl_tokens:
+            if token_id in tokenizer.id2token:
+                token = tokenizer.id2token[token_id]
+                if token not in ['[BOS]', '[EOS]', '[PAD]']:
+                    tokens.append(token)
+        
+        grid = []
+        current_row = []
+        for token in tokens:
+            if token == 'NL':
+                if current_row:
+                    grid.append(current_row)
+                    current_row = []
+            else:
+                current_row.append(token)
+        if current_row:
+            grid.append(current_row)
+        
+        if not grid:
+            return np.array([]), np.array([])
+        
+        num_rows = len(grid)
+        num_cols = len(grid[0])
+        
+        # Row span matrix 생성
+        row_span_matrix = np.ones((num_rows, num_cols))
+        for i in range(num_rows):
+            for j in range(num_cols):
+                if grid[i][j] == 'C':
+                    try:
+                        span_size = 1
+                        k = j + 1
+                        while k < num_cols and grid[i][k] in ['L', 'X']:
+                            span_size += 1
+                            k += 1
+                        for c in range(j, k):
+                            row_span_matrix[i][c] = span_size
+                    except Exception as e:
+                        print(f"Error in row span calculation at ({i}, {j}):")
+                        print(f"Grid shape: {num_rows}x{num_cols}")
+                        print(f"Current row: {grid[i]}")
+                        print(f"Error: {str(e)}")
+                        raise
+        
+        # Column span matrix 생성
+        col_span_matrix = np.ones((num_rows, num_cols))
+        for i in range(num_rows):
+            for j in range(num_cols):
+                if grid[i][j] == 'C':
+                    try:
+                        span_size = 1
+                        k = i + 1
+                        while k < num_rows and grid[k][j] in ['U', 'X']:
+                            span_size += 1
+                            k += 1
+                        for r in range(i, k):
+                            col_span_matrix[r][j] = span_size
+                    except Exception as e:
+                        print(f"Error in column span calculation at ({i}, {j}):")
+                        print(f"Grid shape: {num_rows}x{num_cols}")
+                        print(f"Current column: {[grid[r][j] for r in range(num_rows)]}")
+                        print(f"Error: {str(e)}")
+                        raise
+                        
+        return row_span_matrix, col_span_matrix
+        
+    except Exception as e:
+        print("\n=== Error in extract_spans_from_otsl ===")
+        print(f"Input tokens: {otsl_tokens}")
+        print(f"Decoded tokens: {tokens}")
+        print("\nGrid:")
+        for row in grid:
+            print(row)
+        print(f"\nError: {str(e)}")
+        raise
     
-    grid = []
-    current_row = []
-    for token in tokens:
-        if token == 'NL':
-            if current_row:
-                grid.append(current_row)
-                current_row = []
-        else:
-            current_row.append(token)
-    if current_row:
-        grid.append(current_row)
+# def extract_spans_from_otsl(otsl_tokens: List[int], tokenizer: OTSLTokenizer) -> Tuple[np.ndarray, np.ndarray]:
+#     """OTSL 토큰에서 span matrix 추출"""
+#     # 1. OTSL 토큰을 그리드로 변환
+#     tokens = []
+#     for token_id in otsl_tokens:
+#         if token_id in tokenizer.id2token:
+#             token = tokenizer.id2token[token_id]
+#             if token not in ['[BOS]', '[EOS]', '[PAD]']:
+#                 tokens.append(token)
     
-    if not grid:
-        return np.array([]), np.array([])
+#     grid = []
+#     current_row = []
+#     for token in tokens:
+#         if token == 'NL':
+#             if current_row:
+#                 grid.append(current_row)
+#                 current_row = []
+#         else:
+#             current_row.append(token)
+#     if current_row:
+#         grid.append(current_row)
     
-    num_rows = len(grid)
-    num_cols = len(grid[0])
+#     if not grid:
+#         return np.array([]), np.array([])
     
-    # Row span matrix 생성
-    row_span_matrix = np.ones((num_rows, num_cols))
-    for i in range(num_rows):
-        for j in range(num_cols):
-            if grid[i][j] == 'C':
-                # 현재 셀부터 시작하여 연속된 span 크기 계산
-                span_size = 1
-                # 오른쪽으로 L 토큰 카운트
-                k = j + 1
-                while k < num_cols and grid[i][k] in ['L', 'X']:
-                    span_size += 1
-                    k += 1
-                # 시작 셀(C)과 모든 span된 셀(L)에 동일한 크기 할당
-                for c in range(j, k):
-                    row_span_matrix[i][c] = span_size
+#     num_rows = len(grid)
+#     num_cols = len(grid[0])
     
-    # Column span matrix 생성
-    col_span_matrix = np.ones((num_rows, num_cols))
-    for i in range(num_rows):
-        for j in range(num_cols):
-            if grid[i][j] == 'C':
-                # 현재 셀부터 시작하여 연속된 span 크기 계산
-                span_size = 1
-                # 아래로 U 토큰 카운트
-                k = i + 1
-                while k < num_rows and grid[k][j] in ['U', 'X']:
-                    span_size += 1
-                    k += 1
-                # 시작 셀(C)과 모든 span된 셀(U)에 동일한 크기 할당
-                for r in range(i, k):
-                    col_span_matrix[r][j] = span_size
+#     # Row span matrix 생성
+#     row_span_matrix = np.ones((num_rows, num_cols))
+#     for i in range(num_rows):
+#         for j in range(num_cols):
+#             if grid[i][j] == 'C':
+#                 # 현재 셀부터 시작하여 연속된 span 크기 계산
+#                 span_size = 1
+#                 # 오른쪽으로 L 토큰 카운트
+#                 k = j + 1
+#                 while k < num_cols and grid[i][k] in ['L', 'X']:
+#                     span_size += 1
+#                     k += 1
+#                 # 시작 셀(C)과 모든 span된 셀(L)에 동일한 크기 할당
+#                 for c in range(j, k):
+#                     row_span_matrix[i][c] = span_size
     
-    # print("Grid:")
-    # for row in grid:
-    #     print(row)
-    # print("Row span matrix:")
-    # for row in row_span_matrix:
-    #     print(row)
-    # print("Column span matrix:")
-    # for row in col_span_matrix:
-    #     print(row)
-    return row_span_matrix, col_span_matrix
+#     # Column span matrix 생성
+#     col_span_matrix = np.ones((num_rows, num_cols))
+#     for i in range(num_rows):
+#         for j in range(num_cols):
+#             if grid[i][j] == 'C':
+#                 # 현재 셀부터 시작하여 연속된 span 크기 계산
+#                 span_size = 1
+#                 # 아래로 U 토큰 카운트
+#                 k = i + 1
+#                 while k < num_rows and grid[k][j] in ['U', 'X']:
+#                     span_size += 1
+#                     k += 1
+#                 # 시작 셀(C)과 모든 span된 셀(U)에 동일한 크기 할당
+#                 for r in range(i, k):
+#                     col_span_matrix[r][j] = span_size
+    
+#     # print("Grid:")
+#     # for row in grid:
+#     #     print(row)
+#     # print("Row span matrix:")
+#     # for row in row_span_matrix:
+#     #     print(row)
+#     # print("Column span matrix:")
+#     # for row in col_span_matrix:
+#     #     print(row)
+#     return row_span_matrix, col_span_matrix
 
 def compute_span_coefficients(
-    row_span_matrix: np.ndarray,  # (num_rows, num_cols) - grid 크기
-    col_span_matrix: np.ndarray,  # (num_rows, num_cols) - grid 크기
-    box_indices: torch.Tensor,    # (N,) - bbox의 'C' 토큰 위치
-    num_boxes: int                # N - 실제 bbox 수
+    row_span_matrix: np.ndarray,  # (num_rows, num_cols)
+    col_span_matrix: np.ndarray,  # (num_rows, num_cols)
+    box_indices: torch.Tensor,    # (N, M)
+    num_boxes: int                # N
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """실제 bbox 간의 coefficient matrix 계산
-    
-    Returns:
-        row_coef: (N, N) - bbox 간의 row-wise coefficient
-        col_coef: (N, N) - bbox 간의 column-wise coefficient
-    """
+    """실제 bbox 간의 coefficient matrix 계산 (many-to-one 관계 지원)"""
     num_rows, num_cols = row_span_matrix.shape
+    device = box_indices.device  # box_indices의 device 사용
     
-    # 1. bbox가 있는 위치의 span 정보만 추출
-    row_coef = np.zeros((num_boxes, num_boxes))  # (N, N)
-    col_coef = np.zeros((num_boxes, num_boxes))  # (N, N)
+    # box_indices를 flatten하고 유효한 인덱스만 선택
+    box_indices_flat = box_indices.view(-1)  # (N*M,)
+    valid_mask = box_indices_flat != -1
+    valid_indices = box_indices_flat[valid_mask]
     
-    # 2. 각 bbox pair에 대해 coefficient 계산
-    for i, idx1 in enumerate(box_indices):  # i: 0 to N-1
-        if idx1 == -1:  # padding index
-            continue
-            
-        # 1D -> 2D 변환 (OTSL 토큰 시퀀스에서의 위치)
-        token_pos1 = idx1.item()
-        # 현재 토큰의 grid 상 위치 계산
-        row1 = token_pos1 // num_cols
-        col1 = token_pos1 % num_cols
-        
-        # grid 범위 체크
-        if row1 >= num_rows or col1 >= num_cols:
-            continue
-            
-        span1_row = row_span_matrix[row1, col1]  # i번째 bbox의 row span 크기
-        span1_col = col_span_matrix[row1, col1]  # i번째 bbox의 col span 크기
-        
-        for j, idx2 in enumerate(box_indices):  # j: 0 to N-1
-            if idx2 == -1 or i == j:  # padding index나 자기 자신은 skip
-                continue
-                
-            # 1D -> 2D 변환
-            token_pos2 = idx2.item()
-            row2 = token_pos2 // num_cols
-            col2 = token_pos2 % num_cols
-            
-            # grid 범위 체크
-            if row2 >= num_rows or col2 >= num_cols:
-                continue
-                
-            span2_row = row_span_matrix[row2, col2]  # j번째 bbox의 row span 크기
-            span2_col = col_span_matrix[row2, col2]  # j번째 bbox의 col span 크기
-            
-            # 같은 행에 있는 경우
-            if row1 == row2:
-                overlap = min(span1_row, span2_row)  # 겹치는 span 크기
-                row_coef[i, j] = overlap / (span1_row * span2_row)  # Equation 6
-            
-            # 같은 열에 있는 경우
-            if col1 == col2:
-                overlap = min(span1_col, span2_col)  # 겹치는 span 크기
-                col_coef[i, j] = overlap / (span1_col * span2_col)  # Equation 6
+    if len(valid_indices) == 0:
+        return torch.zeros((num_boxes, num_boxes), device=device), torch.zeros((num_boxes, num_boxes), device=device)
     
-    return torch.from_numpy(row_coef), torch.from_numpy(col_coef)
-
+    # 1D -> 2D 변환을 벡터화
+    rows = (valid_indices // num_cols).cpu().numpy()
+    cols = (valid_indices % num_cols).cpu().numpy()
+    
+    # 범위를 벗어나는 인덱스 필터링
+    valid_range = (rows < num_rows) & (cols < num_cols)
+    rows = rows[valid_range]
+    cols = cols[valid_range]
+    
+    # Span 정보 추출 (float32로 변환)
+    row_spans = row_span_matrix[rows, cols].astype(np.float32)  # (V,)
+    col_spans = col_span_matrix[rows, cols].astype(np.float32)  # (V,)
+    
+    # 행/열 매칭 행렬 생성 (V, V)
+    same_row = (rows[:, None] == rows[None, :])  # (V, V)
+    same_col = (cols[:, None] == cols[None, :])  # (V, V)
+    
+    # Span overlap 계산 (float32로 유지)
+    row_overlap = np.minimum(row_spans[:, None], row_spans[None, :])  # (V, V)
+    col_overlap = np.minimum(col_spans[:, None], col_spans[None, :])  # (V, V)
+    
+    # Coefficient 계산 (float32로 유지)
+    row_coef_valid = np.where(
+        same_row,
+        row_overlap / (row_spans[:, None] * row_spans[None, :]),
+        0
+    ).astype(np.float32)  # (V, V)
+    
+    col_coef_valid = np.where(
+        same_col,
+        col_overlap / (col_spans[:, None] * col_spans[None, :]),
+        0
+    ).astype(np.float32)  # (V, V)
+    
+    # 최종 크기의 coefficient 행렬 생성
+    row_coef = torch.zeros((num_boxes, num_boxes), dtype=torch.float32, device=device)
+    col_coef = torch.zeros((num_boxes, num_boxes), dtype=torch.float32, device=device)
+    
+    # box_indices의 원래 box 인덱스 복원 (device 일치시킴)
+    box_idx_map = torch.div(
+        torch.arange(len(box_indices_flat), device=device),
+        box_indices.size(1),
+        rounding_mode='floor'
+    )[valid_mask][valid_range]
+    
+    # 유효한 인덱스에 대해서만 값 할당 (many-to-one 관계 고려)
+    for i, (src_idx, tgt_idx) in enumerate(zip(box_idx_map.cpu(), box_idx_map.cpu())):
+        for j, (src_idx2, tgt_idx2) in enumerate(zip(box_idx_map.cpu(), box_idx_map.cpu())):
+            row_coef[src_idx, src_idx2] = max(row_coef[src_idx, src_idx2], torch.tensor(row_coef_valid[i, j], device=device))
+            col_coef[src_idx, src_idx2] = max(col_coef[src_idx, src_idx2], torch.tensor(col_coef_valid[i, j], device=device))
+    
+    return row_coef, col_coef
 
 def get_coef_matrix(
     otsl_tokens: torch.Tensor,  # (B, L)
     tokenizer: OTSLTokenizer,
-    box_indices: torch.Tensor,  # (B, N)
+    box_indices: torch.Tensor,  # (B, N, M)
     num_boxes: int
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """OTSL 토큰에서 span coefficient matrix 추출"""
+    """OTSL 토큰에서 span coefficient matrix 추출 (many-to-one 관계 지원)"""
     B = otsl_tokens.size(0)
     row_coefs, col_coefs = [], []
     
@@ -564,7 +676,7 @@ def get_coef_matrix(
         row_coef, col_coef = compute_span_coefficients(
             row_span_matrix=row_span_matrix,
             col_span_matrix=col_span_matrix,
-            box_indices=box_indices[b],  # 현재 배치의 box_indices
+            box_indices=box_indices[b],  # (N, M)
             num_boxes=num_boxes
         )
         

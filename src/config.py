@@ -9,13 +9,13 @@ class ModelConfig:
     vocab_size: int = 50265     # BART tokenizer의 전체 vocabulary 크기
     feature_dim: int = 768      # 모델의 hidden dimension 크기
     max_seq_length: int = 1376  # 최대 시퀀스(토큰) 길이
-    image_size: int = 384       # 입력 이미지의 크기 (height=width)  # 논문 768
+    image_size: int = 768       # 입력 이미지의 크기 (height=width)  # 논문 768
     temperature: float = 0.1    # Layout Pointer의 softmax temperature
     
     # Swin Transformer 설정
-    # swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
+    swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
     # swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
-    swin_model_name: str = "microsoft/swinv2-tiny-patch4-window16-256"
+    # swin_model_name: str = "microsoft/swinv2-tiny-patch4-window16-256"
     
     # BART model 설정
     encoder_layers: int = 6
@@ -54,11 +54,11 @@ class TrainingConfig:
     
     # Training
     total_steps: int = 100000
-    eval_steps: int = 5000
-    save_steps: int = 5000
+    eval_steps: int = 25
+    save_steps: int = 2000
     checkpoint_dir: str = "./checkpoints"
     
-    batch_size: int = 8
+    batch_size: int = 4
     gradient_accumulation_steps: int = 8
     learning_rate: float = 1e-3
     # weight_decay: float = 0.05

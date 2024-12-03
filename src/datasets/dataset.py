@@ -13,8 +13,8 @@ from utils.util import extract_spans_from_html, convert_html_to_otsl, extract_sp
 # 디버그 모드 설정
 DEBUG = True
 DEBUG_SAMPLES = {
-    'train': 10000,
-    'val': 100
+    'train': 100,
+    'val': 10
 }
 
 class TableDataset(Dataset):
@@ -39,7 +39,6 @@ class TableDataset(Dataset):
         self.split = split
         self.max_seq_length = max_seq_length
         self.image_size = image_size
-        self.use_ocr = use_ocr
         
         # Tokenizer 초기화
         self.tokenizer = tokenizer or OTSLTokenizer()
@@ -62,6 +61,7 @@ class TableDataset(Dataset):
         self.annotations = {}
         self.image_names = []
         self.cached_otsl_tokens = {}  # OTSL 토큰 캐시 추가
+        self.cached_has_data = {}
         
         annotation_file = os.path.join(self.data_dir, f"{self.split}_filtered.jsonl")
         print(f"Loading {self.split} annotations from {annotation_file}")
@@ -90,10 +90,11 @@ class TableDataset(Dataset):
                     
                     # 3. OTSL 변환 및 토큰화를 미리 수행
                     try:
-                        otsl_sequence = convert_html_to_otsl(ann)
+                        otsl_sequence, has_data = convert_html_to_otsl(ann)
                         otsl_tokens = self.tokenizer.encode(otsl_sequence, html_structure=ann['html']['structure'])
                         # 검증이 완료된 토큰을 캐시에 저장
                         self.cached_otsl_tokens[ann['filename']] = otsl_tokens
+                        self.cached_has_data[ann['filename']] = has_data
                     
                     except Exception as e:
                         error_counts['otsl_conversion'] = error_counts.get('otsl_conversion', 0) + 1
@@ -119,109 +120,155 @@ class TableDataset(Dataset):
         if valid_count == 0:
             raise ValueError(f"No valid samples found in {annotation_file}")
 
-    def __getitem__(self, idx: int) -> Dict:
-        """데이터셋에서 하나의 샘플을 가져옴"""
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        """데이터셋에서 하나의 샘플을 가져옴
+        
+        Args:
+            idx: 데이터 인덱스
+            
+        Returns:
+            Dict[str, torch.Tensor]: 처리된 데이터 샘플
+            - image_name: 이미지 파일명
+            - image: 정규화된 이미지 텐서 (3, H, W)
+            - tokens: OTSL 토큰 시퀀스 (L)
+            - bboxes: 정규화된 bbox 좌표 (N, 4)
+            - box_indices: C 토큰과 bbox 매핑 (N, M)
+            - data_tag_mask: C 토큰 위치 마스크 (L)
+            - cells: 원본 cell 데이터
+            - html: 원본 HTML 구조
+            
+        Raises:
+            ValueError: 데이터 로드 또는 처리 중 오류 발생 시
+        """
         try:
+            # 1. 기본 데이터 로드 및 검증
             image_name = self.image_names[idx]
             ann = self.annotations[image_name]
             
-            # 1. 이미지 로드 및 전처리
-            image = Image.open(os.path.join(self.data_dir, self.split, image_name)).convert('RGB')
+            if 'html' not in ann or 'cells' not in ann['html'] or 'structure' not in ann['html']:
+                raise ValueError(f"Invalid annotation structure for {image_name}")
+            
+            # 2. 이미지 로드 및 전처리
+            image_path = os.path.join(self.data_dir, self.split, image_name)
+            if not os.path.exists(image_path):
+                raise ValueError(f"Image file not found: {image_path}")
+                
+            image = Image.open(image_path).convert('RGB')
             image_width, image_height = image.size
             image = self.transform(image)
             
-            # 2. 캐시된 OTSL 토큰 사용
+            # 3. OTSL 토큰 및 has_data 플래그 검증
+            if image_name not in self.cached_otsl_tokens or image_name not in self.cached_has_data:
+                raise ValueError(f"Missing cached data for {image_name}")
+                
             otsl_tokens = self.cached_otsl_tokens[image_name]
+            has_data_flags = self.cached_has_data[image_name]
             
             # 4. Cell 정보 추출 및 정규화
             cells = []
             bboxes = []
-            for cell in ann['html']['cells']:
-                if 'bbox' in cell:
-                    x0, y0, x1, y1 = cell['bbox']
-                    normalized_bbox = [
-                        x0 / image_width,
-                        y0 / image_height,
-                        x1 / image_width,
-                        y1 / image_height
-                    ]
-                    bboxes.append(normalized_bbox)
-                    
-                    # tokens를 하나의 텍스트로 합치기
-                    text = ''.join(cell['tokens'])
-                    # HTML 태그 제거 (선택사항)
-                    text = text.replace('<b>', '').replace('</b>', '') \
-                             .replace('<i>', '').replace('</i>', '') \
-                             .replace('<sup>', '').replace('</sup>', '')
-                    
-                    cells.append({
-                        'text': text,
-                        'bbox': normalized_bbox
-                    })
             
+            for cell in ann['html']['cells']:
+                if 'bbox' not in cell:
+                    continue
+                    
+                x0, y0, x1, y1 = cell['bbox']
+                
+                # bbox 유효성 검사
+                if not all(isinstance(coord, (int, float)) for coord in [x0, y0, x1, y1]):
+                    continue
+                if x0 >= x1 or y0 >= y1:
+                    continue
+                if x0 < 0 or y0 < 0 or x1 > image_width or y1 > image_height:
+                    continue
+                
+                # bbox 정규화
+                normalized_bbox = [
+                    x0 / image_width,
+                    y0 / image_height,
+                    x1 / image_width,
+                    y1 / image_height
+                ]
+                bboxes.append(normalized_bbox)
+                
+                # cell 텍스트 정제
+                text = ''.join(cell['tokens'])
+                text = text.replace('<b>', '').replace('</b>', '') \
+                           .replace('<i>', '').replace('</i>', '') \
+                           .replace('<sup>', '').replace('</sup>', '') \
+                           .replace('<sub>', '').replace('</sub>', '')
+                
+                cells.append({
+                    'text': text,
+                    'bbox': normalized_bbox
+                })
+            
+            if not bboxes:
+                raise ValueError(f"No valid bboxes found in {image_name}")
+            
+            # 5. Box indices 및 masks 생성
             special_token_ids = {
                 self.tokenizer.bos_token_id,
                 self.tokenizer.eos_token_id,
-                self.tokenizer.pad_token_id
+                self.tokenizer.pad_token_id,
+                self.tokenizer.unk_token_id
             }
             
-            # Data tag mask와 box indices 생성
-            data_tag_positions = []  # 'C' 토큰의 위치
-            box_indices = []         # bbox가 있는 'C' 토큰의 위치
-            empty_mask = torch.zeros(len(otsl_tokens), dtype=torch.bool)  # empty cell mask
+            # Data tag mask 초기화
+            data_tag_mask = torch.zeros(len(otsl_tokens), dtype=torch.bool)
             
-            # 1. 모든 'C' 토큰의 위치 찾기
-            for i, token_id in enumerate(otsl_tokens):
+            # C 토큰 위치와 데이터 존재 여부 매핑
+            valid_c_positions = []  # 실제 데이터가 있는 'C' 토큰의 위치
+            all_c_positions = []    # 모든 'C' 토큰의 위치
+            
+            has_data_flags = [False] + has_data_flags  # [BOS] 토큰을 위한 패딩
+            
+            # C 토큰 위치 계산
+            c_token_id = self.tokenizer.token2id["C"]
+            for i, (token_id, has_data) in enumerate(zip(otsl_tokens, has_data_flags)):
                 if token_id in special_token_ids:
                     continue
-                token = self.tokenizer.id2token[token_id]
-                if token == 'C':
-                    data_tag_positions.append(i)
+                    
+                if token_id == c_token_id:
+                    data_tag_mask[i] = True
+                    all_c_positions.append(i)
+                    if has_data:
+                        valid_c_positions.append(i)
             
-            # 2. Data tag mask 생성 - 모든 'C' 토큰 위치를 True로
-            data_tag_mask = torch.zeros(len(otsl_tokens), dtype=torch.bool)
-            for pos in data_tag_positions:
-                data_tag_mask[pos] = True
+            # Box indices 계산
+            box_to_tokens = [[] for _ in range(len(bboxes))]
             
-            # 3. Box indices와 empty mask 생성
-            bbox_to_token_map = {}  # bbox index -> token position
-            curr_bbox_idx = 0
+            # HTML cells의 순서대로 매핑
+            cell_idx = 0
+            for pos in all_c_positions:
+                if cell_idx >= len(bboxes):
+                    break
+                if pos in valid_c_positions:
+                    box_to_tokens[cell_idx].append(pos)
+                cell_idx += 1
             
-            # 먼저 bbox가 있는 cell 매핑
-            for cell in ann['html']['cells']:
-                if 'bbox' in cell:  # bbox가 있는 cell
-                    if curr_bbox_idx < len(data_tag_positions):
-                        bbox_to_token_map[curr_bbox_idx] = data_tag_positions[curr_bbox_idx]
-                        curr_bbox_idx += 1
+            # 최대 매핑 수 계산 및 padding
+            max_mappings = max(max(len(tokens) for tokens in box_to_tokens), 1)
+            box_indices = torch.full((len(bboxes), max_mappings), -1, dtype=torch.long)
             
-            # Empty cell 찾기 (bbox가 없는 'C' 토큰)
-            mapped_positions = set(bbox_to_token_map.values())
-            for pos in data_tag_positions:
-                if pos not in mapped_positions:
-                    empty_mask[pos] = True
+            for i, tokens in enumerate(box_to_tokens):
+                if tokens:
+                    box_indices[i, :len(tokens)] = torch.tensor(tokens, dtype=torch.long)
             
-            # Box indices 텐서 생성
-            box_indices = []
-            for i in range(len(bboxes)):
-                if i in bbox_to_token_map:
-                    box_indices.append(bbox_to_token_map[i])
-                else:
-                    box_indices.append(-1)  # padding index
-            
+            # 6. 최종 결과 반환
             return {
                 'image_name': image_name,
-                'image': image,
-                'tokens': torch.tensor(otsl_tokens, dtype=torch.long),
-                'bboxes': torch.tensor(bboxes, dtype=torch.float32),
-                'box_indices': torch.tensor(box_indices, dtype=torch.long),
-                'data_tag_mask': data_tag_mask,
-                'empty_mask': empty_mask,  # 추가: empty cell mask
+                'image': image,                                                    # (3, H, W)
+                'tokens': torch.tensor(otsl_tokens, dtype=torch.long),            # (L)
+                'bboxes': torch.tensor(bboxes, dtype=torch.float32),             # (N, 4)
+                'box_indices': box_indices,                                       # (N, M)
+                'data_tag_mask': data_tag_mask,                                  # (L)
                 'cells': cells,
                 'html': ann['html']
             }
             
         except Exception as e:
-            print(f"Error processing sample {idx}: {str(e)}")
+            print(f"Error processing sample {idx} ({image_name if 'image_name' in locals() else 'unknown'}): {str(e)}")
             # 다음 유효한 샘플 반환
             return self.__getitem__((idx + 1) % len(self))
 
