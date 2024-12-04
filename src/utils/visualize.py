@@ -14,8 +14,9 @@ def visualize_validation_sample(
         pred_otsl: str,
         true_otsl: str,
         pointer_logits: Optional[torch.Tensor],
-        step: int,
-        viz_dir: Path
+        empty_logits: Optional[torch.Tensor] = None,
+        step: int = 0,
+        viz_dir: Optional[Path] = None
     ) -> None:
     """검증 샘플 시각화"""
     plt.figure(figsize=(20, 8))
@@ -33,7 +34,7 @@ def visualize_validation_sample(
     
     # OTSL 토큰을 그리드로 변환
     def tokens_to_grid(otsl_str):
-        tokens = [t for t in otsl_str.split() if t not in ['[BOS]', '[EOS]', '[PAD]']]
+        tokens = [t for t in otsl_str.split() if t not in ['[BOS]', '[EOS]', '[PAD]', '[UNK]']]
         grid = []
         current_row = []
         for token in tokens:
@@ -50,7 +51,7 @@ def visualize_validation_sample(
     true_grid = tokens_to_grid(true_otsl)
     pred_grid = tokens_to_grid(pred_otsl)
     
-    def visualize_grid(ax, grid, boxes, pointer_logits=None, title=''):
+    def visualize_grid(ax, grid, boxes, pointer_logits=None, empty_logits=None, title=''):
         ax.imshow(img)
         ax.set_title(title)
         
@@ -81,7 +82,8 @@ def visualize_validation_sample(
                         # 셀 정보 표시
                         text = f"({i},{j})\n{token}"
                         if pointer_logits is not None:
-                            confidence = torch.sigmoid(pointer_logits[0, box_idx].max()).item()
+                            # softmax 적용하여 confidence 계산
+                            confidence = torch.softmax(pointer_logits[0, box_idx], dim=-1).max().item()
                             text += f"\n{confidence:.2f}"
                         
                         ax.text(x1 * W, y1 * H, 
@@ -93,12 +95,19 @@ def visualize_validation_sample(
                         box_idx += 1
                     else:
                         # bbox가 없는 'C' 토큰 (빈 셀)
-                        # 이전 셀의 위치를 기반으로 추정된 위치에 점선으로 표시
+                        # Empty logits 정보 표시
+                        empty_conf = None
+                        if empty_logits is not None:
+                            empty_conf = torch.sigmoid(empty_logits[0, j]).item()
+                        
                         if j > 0 and (i,j-1) in cell_boxes:
                             prev_box = cell_boxes[(i,j-1)]
                             x2, y1 = prev_box[2], prev_box[1]
+                            text = f"({i},{j})\n{token}\n(empty)"
+                            if empty_conf is not None:
+                                text += f"\n{empty_conf:.2f}"
                             ax.text(x2 * W + 10, y1 * H, 
-                                    f"({i},{j})\n{token}\n(empty)",
+                                    text,
                                     color='black', fontsize=5,
                                     bbox=dict(facecolor='lightgray', alpha=0.3, pad=0.2))
                 
@@ -165,8 +174,7 @@ def visualize_validation_sample(
     
     # Prediction 시각화
     ax2 = plt.subplot(1, 2, 2)
-    visualize_grid(ax2, tokens_to_grid(pred_otsl), boxes, pointer_logits, title='Predicted Structure')
-    
+    visualize_grid(ax2, tokens_to_grid(pred_otsl), boxes, pointer_logits, empty_logits, title='Predicted Structure')
     
     # 저장
     img_dir = viz_dir / "images"

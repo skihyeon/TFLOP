@@ -14,6 +14,10 @@ class TFLOPLightningModule(pl.LightningModule):
         self.train_config = train_config
         self.inference_mode = inference_mode
         
+        # Dataset의 max_boxes를 모델 설정에 추가
+        if hasattr(train_config, 'dataset') and train_config.dataset is not None:
+            self.model_config.max_boxes = train_config.dataset.max_boxes
+        
         # Model components
         self.model = TFLOP(model_config, inference_mode)
         self.criterion = TFLOPLoss(
@@ -23,7 +27,7 @@ class TFLOPLightningModule(pl.LightningModule):
             lambda_row_contr=model_config.lambda_row_contr,
             lambda_col_contr=model_config.lambda_col_contr,
             tokenizer=self.model.tokenizer
-        )
+        ) 
         
     def forward(self, batch):
         # 키 이름 변환
@@ -50,7 +54,7 @@ class TFLOPLightningModule(pl.LightningModule):
             # self.log(f"train/{name}", value, 
             #         batch_size=batch_size,
             #         on_step=True,
-            #         on_epoch=False,  # epoch 로�� 비활성화
+            #         on_epoch=False,  # epoch 로 비활성화
             #         prog_bar=(name == 'loss')
             #         )
             if name == 'loss': name = 'l'
@@ -71,80 +75,128 @@ class TFLOPLightningModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         outputs = self(batch)
         batch_size = batch['images'].size(0)
-        loss_dict = self.criterion(batch, outputs)  
+        loss_dict = self.criterion(batch, outputs)
         
-        # 1. Loss 로깅 - 메트릭 이름에서 _step 제거
+        # pointer logits와 empty logits 계산
+        box_features = outputs['box_proj']      # (B, N, D)
+        tag_features = outputs['tag_proj']      # (B, T, D)
+        empty_proj = outputs['empty_proj']      # (B, 1, D)
+        
+        # pointer logits 계산 (temperature=0.1 사용)
+        pointer_logits = torch.matmul(box_features, tag_features.transpose(-2, -1)) / 0.1  # (B, N, T)
+        empty_logits = torch.matmul(tag_features, empty_proj.transpose(-2, -1)).squeeze(-1)  # (B, T)
+        
+        # 시각화를 위해 outputs에 추가
+        outputs['pointer_logits'] = pointer_logits
+        outputs['empty_logits'] = empty_logits
+        
+        # 1. Loss 로깅
         for name, value in loss_dict.items():
             self.log(f"val/{name}", value, 
                     batch_size=batch_size,
-                    on_step=False,     # 스텝별 로깅 비활성화
-                    on_epoch=True,     # 에폭 평균 계산
+                    on_step=False,
+                    on_epoch=True,
                     prog_bar=(name == 'loss'),
                     sync_dist=True)
         
         # 2. TEDS 메트릭 계산 및 로깅
         try:
-            pred_otsl = self.model.tokenizer.decode(
-                outputs['tag_logits'][0].argmax(dim=-1).cpu().tolist()
-            )
-            true_otsl = self.model.tokenizer.decode(
-                batch['tokens'][0].cpu().tolist()
-            )
-            
-            # text regions 정보 준비 (첫 번째 샘플의 cells 정보)
-            text_regions = batch['cells'][0]
-            
-            try:
-                # 예측 HTML 생성
-                pred_html = construct_table_html_pred(
-                    pred_otsl,
-                    text_regions,
-                    outputs['pointer_logits'][0]
-                )
-                
-                # Ground Truth HTML 생성 (text 정보 포함)
-                true_html = construct_table_html_gt(
-                    batch['html'][0]
-                )
-            except ValueError as e:
-                print(f"Warning: Failed to construct HTML: {str(e)}")
-                pred_html = "<table><tr><td>Invalid OTSL sequence</td></tr></table>"
-                true_html = "<table><tr><td>Invalid OTSL sequence</td></tr></table>"
-            
-            # TEDS 및 TEDS-Structure 계산
-            teds = compute_teds(pred_html, true_html)
-            teds_struct = compute_teds_struct(pred_html, true_html)
-            
-            # TEDS 메트릭 로깅 - _step 없이 로깅
-            self.log('val/teds', teds,
-                    batch_size=batch_size,
-                    on_step=False,     # 스텝별 로깅 비활성화
-                    on_epoch=True,     # 에폭 평균 계산
-                    prog_bar=True,
-                    sync_dist=True)
-            self.log('val/teds_s', teds_struct,
-                    batch_size=batch_size,
-                    on_step=False,     # 스텝별 로깅 비활성화
-                    on_epoch=True,     # 에폭 평균 계산
-                    prog_bar=True,
-                    sync_dist=True)
-            
-            # 3. 첫 번째 배치의 첫 번째 샘플에 대해서만 시각화 데이터 준비
+            # 첫 번째 배치의 모든 샘플에 대해 토큰 분포 디버깅
             if batch_idx == 0:
-                # 시각화용 출력 준비
-                outputs.update({
-                    'pred_otsl': pred_otsl,
-                    'true_otsl': true_otsl,
-                    'pred_html': pred_html,
-                    'true_html': true_html,
-                    'complete_html': pred_html,  # complete_html은 이제 pred_html과 동일
-                    'teds': teds,
-                    'teds_s': teds_struct
-                })
+                batch_results = []
                 
+                # 예측된 토큰 분포 (한 번에 계산)
+                pred_tokens = outputs['tag_logits'][0].argmax(dim=-1)
+                token_dist = torch.bincount(pred_tokens.view(-1), 
+                                            minlength=self.model.tokenizer.vocab_size)
+                
+                # Ground Truth 토큰 분포 (한 번에 계산)
+                true_tokens = batch['tokens'][0]
+                true_dist = torch.bincount(true_tokens.view(-1),
+                                        minlength=self.model.tokenizer.vocab_size)
+                
+                for i in range(batch_size):
+                    with torch.no_grad():
+                        # 예측된 토큰 분포
+                        pred_tokens = outputs['tag_logits'][i].argmax(dim=-1)
+                        token_dist = torch.bincount(pred_tokens.view(-1), 
+                                                minlength=self.model.tokenizer.vocab_size)
+                        
+                        # Ground Truth 토큰 분포
+                        true_tokens = batch['tokens'][i]
+                        true_dist = torch.bincount(true_tokens.view(-1),
+                                                minlength=self.model.tokenizer.vocab_size)
+                        
+                        print("\n=== Token Distribution Debug ===")
+                        print("Token Distributions (Pred | True):")
+                        for token_id in range(self.model.tokenizer.vocab_size):
+                            pred_count = token_dist[token_id].item()
+                            true_count = true_dist[token_id].item()
+                            if pred_count > 0 or true_count > 0:
+                                token = self.model.tokenizer.id2token[token_id]
+                                print(f"  {token:8s}: {pred_count:4d} | {true_count:4d}")
+                                
+                        # OTSL 시퀀스 디코딩
+                        pred_otsl = self.model.tokenizer.decode(
+                            pred_tokens.cpu().tolist()
+                        )
+                        true_otsl = self.model.tokenizer.decode(
+                            true_tokens.cpu().tolist()
+                        )
+                        
+                        # HTML 생성
+                        text_regions = batch['cells'][i]
+                        try:
+                            pred_html = construct_table_html_pred(
+                                pred_otsl,
+                                text_regions,
+                                outputs['pointer_logits'][i],  # 새로 계산된 pointer_logits 사용
+                                # outputs['empty_logits'][i]     # 새로 계산된 empty_logits 사용
+                            )
+                            true_html = construct_table_html_gt(
+                                batch['html'][i]
+                            )
+                        except ValueError as e:
+                            print(f"Warning: Failed to construct HTML for sample {i}: {str(e)}")
+                            pred_html = "<table><tr><td>Invalid OTSL sequence</td></tr></table>"
+                            true_html = "<table><tr><td>Invalid OTSL sequence</td></tr></table>"
+                        
+                        # TEDS 계산
+                        teds = compute_teds(pred_html, true_html)
+                        teds_struct = compute_teds_struct(pred_html, true_html)
+                        
+                        # 결과 저장
+                        outputs.update({
+                            'sample_idx': i,
+                            'pred_otsl': pred_otsl,
+                            'true_otsl': true_otsl,
+                            'pred_html': pred_html,
+                            'true_html': true_html,
+                            'teds': teds,
+                            'teds_s': teds_struct,
+                            'token_dist': token_dist,
+                            'true_dist': true_dist
+                        })
+                
+                # 전체 배치 결과 출력
+                print("\n=== Validation Batch 0 Results ===")
+                for result in batch_results:
+                    print(f"\nSample {result['sample_idx']}:")
+                    print(f"TEDS: {result['teds']:.4f}, TEDS-S: {result['teds_s']:.4f}")
+                    print("\nToken Distribution (Pred | True):")
+                    for token_id in range(self.model.tokenizer.vocab_size):
+                        pred_count = result['token_dist'][token_id].item()
+                        true_count = result['true_dist'][token_id].item()
+                        if pred_count > 0 or true_count > 0:
+                            token = self.model.tokenizer.id2token[token_id]
+                            print(f"  {token:8s}: {pred_count:4d} | {true_count:4d}")
+                
+                # 첫 번째 배치의 모든 결과를 outputs에 추가
+                outputs.update({
+                    'batch_results': batch_results
+                })
         except Exception as e:
             print(f"Warning: Validation step failed: {str(e)}")
-            # 기본값으로 출력 구성
             outputs.update({
                 'pred_otsl': "Invalid sequence",
                 'true_otsl': "Invalid sequence",
@@ -154,12 +206,11 @@ class TFLOPLightningModule(pl.LightningModule):
                 'teds': 0.0,
                 'teds_s': 0.0
             })
-            # 에러 시에도 동일한 형식으로 로깅
             self.log('val_teds', 0.0, batch_size=batch_size, on_step=True, on_epoch=False, prog_bar=True)
             self.log('val_teds_s', 0.0, batch_size=batch_size, on_step=True, on_epoch=False, prog_bar=True)
         
         return outputs
-
+    
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
             self.parameters(),

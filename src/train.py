@@ -24,12 +24,18 @@ def main():
         exp_dir = Path(train_config.checkpoint_dir) / (timestamp + "_" + train_config.exp_name)
         exp_dir.mkdir(parents=True, exist_ok=True)
     
-    model = TFLOPLightningModule(model_config=model_config, train_config=train_config, inference_mode=False)
-    
     datamodule = TableDataModule(
         data_dir=train_config.data_dir,
         model_config=model_config,
         train_config=train_config
+    )
+    
+    datamodule.setup('fit')
+    
+    model = TFLOPLightningModule(
+        model_config=model_config,
+        train_config=train_config,
+        inference_mode=False
     )
     
     callbacks = [
@@ -85,21 +91,17 @@ def main():
     
     trainer = pl.Trainer(
         max_steps=train_config.total_steps,
-        accelerator="gpu" if torch.cuda.is_available() else "cpu",
-        devices=[train_config.gpu_id] if torch.cuda.is_available() else None,
-        accumulate_grad_batches=train_config.gradient_accumulation_steps,
-        gradient_clip_val=train_config.max_grad_norm,
+        accelerator=train_config.accelerator,
+        devices=train_config.devices,
+        strategy=train_config.strategy,
+        precision=train_config.precision,
+        accumulate_grad_batches=train_config.accumulate_grad_batches,
+        gradient_clip_val=train_config.gradient_clip_val,
         val_check_interval=train_config.eval_steps,
-        num_sanity_val_steps=2,
-        check_val_every_n_epoch=None,
-        max_epochs=-1,
-        limit_train_batches=train_config.total_steps,
-        enable_checkpointing=True,
-        callbacks=callbacks,
+        num_sanity_val_steps=train_config.num_sanity_val_steps,
         logger=logger,
-        log_every_n_steps=train_config.log_every_n_steps if logger else None,
-        enable_progress_bar=True,
-        enable_model_summary=True,
+        callbacks=callbacks,
+        check_val_every_n_epoch=None
     )
 
     if train_config.resume_training and train_config.resume_checkpoint_path:

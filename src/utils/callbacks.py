@@ -30,7 +30,7 @@ class ValidationVisualizationCallback(Callback):
             loss_components = {
                 k.replace('val/', ''): v.item() if torch.is_tensor(v) else v 
                 for k, v in outputs.items() 
-                if k in ['val/loss', 'val/cls_loss', 'val/ptr_loss', 'val/empty_ptr_loss']
+                if k.startswith('val/') and k.endswith('_loss')
             }
             
             # 시각화 저장
@@ -41,7 +41,11 @@ class ValidationVisualizationCallback(Callback):
                 true_html=outputs['true_html'],
                 pred_otsl=outputs['pred_otsl'],
                 true_otsl=outputs['true_otsl'],
+                # box_proj=outputs.get('box_proj', None),
+                # tag_proj=outputs.get('tag_proj', None),
+                # empty_proj=outputs.get('empty_proj', None),
                 pointer_logits=outputs.get('pointer_logits', None),
+                empty_logits=outputs.get('empty_logits', None),
                 step=trainer.global_step,
                 viz_dir=self.viz_dir
             )
@@ -71,7 +75,8 @@ class ValidationVisualizationCallback(Callback):
                             border-radius: 5px;
                         }}
                         .metrics {{
-                            display: flex;
+                            display: grid;
+                            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
                             gap: 10px;
                             margin-bottom: 20px;
                         }}
@@ -79,6 +84,12 @@ class ValidationVisualizationCallback(Callback):
                             background: #f0f0f0;
                             padding: 10px;
                             border-radius: 4px;
+                        }}
+                        .metric.loss {{
+                            background: #ffe0e0;
+                        }}
+                        .metric.teds {{
+                            background: #e0ffe0;
                         }}
                         table {{
                             width: 100%;
@@ -106,16 +117,17 @@ class ValidationVisualizationCallback(Callback):
                         <h2>Table Comparison - Step {trainer.global_step}</h2>
                         
                         <div class="metrics">
-                            <div class="metric">TEDS: {outputs['teds']:.4f}</div>
-                            <div class="metric">TEDS-Struct: {outputs['teds_s']:.4f}</div>
-                            {' '.join(f'<div class="metric">{k}: {v:.4f}</div>' for k, v in loss_components.items())}
+                            <div class="metric teds">TEDS: {outputs['teds']:.4f}</div>
+                            <div class="metric teds">TEDS-Struct: {outputs['teds_s']:.4f}</div>
+                            {' '.join(f'<div class="metric loss">{k}: {v:.4f}</div>' for k, v in loss_components.items())}
                         </div>
                         
                         <div class="table-container">
                             <div class="title">Predicted Table</div>
                             {outputs['pred_html']}
                             <div class="pointer-info">
-                                Pointer Confidence: {torch.softmax(outputs['pointer_logits'][0], dim=-1).max().item():.4f}
+                                <div>Pointer Confidence: {torch.softmax(outputs['box_proj'][0], dim=-1).max().item():.4f}</div>
+                                <div>Empty Pointer Confidence: {torch.sigmoid(outputs['empty_proj'][0]).max().item():.4f}</div>
                             </div>
                         </div>
                         

@@ -110,138 +110,179 @@ def extract_spans_from_html(html_structure: Dict) -> Tuple[List[Dict], np.ndarra
     
     return processed_cells, row_span_matrix, col_span_matrix
 
-def convert_html_to_otsl(ann: Dict) -> Tuple[str, List[bool]]:
+def convert_html_to_otsl(ann: Dict) -> Tuple[Optional[str], List[bool]]:
     """HTML 구조를 OTSL로 변환하고 데이터 존재 여부를 반환
     
     Args:
         ann: PubTabNet annotation 딕셔너리
         
     Returns:
-        otsl_sequence: OTSL 토큰 시퀀스
+        otsl_sequence: OTSL 토큰 시퀀스 (오류 시 None)
         has_data_1D_list: 각 셀의 데이터 존재 여부 (1D 리스트)
     """
-    try:
-        html_tokens = ann['html']['structure']['tokens']
-        cells = ann['html']['cells']
+    if 'html' not in ann or 'structure' not in ann['html'] or 'cells' not in ann['html']:
+        print(f"Error: Missing required HTML structure")
+        return None, []
         
-        # cells의 데이터 존재 여부 미리 계산
-        has_content = [len(cell['tokens']) > 0 for cell in cells]
-        current_cell_idx = 0
+    html_tokens = ann['html']['structure']['tokens']
+    cells = ann['html']['cells']
+    
+    # cells의 데이터 존재 여부 미리 계산
+    has_content = [len(cell['tokens']) > 0 for cell in cells]
+    current_cell_idx = 0
+    
+    # 1. 그리드 크기와 span 정보 수집
+    num_cols = 0
+    current_row = -1
+    current_col = 0
+    spans = {}  # (row, col) -> (rowspan, colspan)
+    active_rowspans = {}  # col -> (start_row, rowspan)
+    
+    i = 0
+
+    while i < len(html_tokens):
+        token = html_tokens[i]
         
-        # 1. 그리드 크기와 span 정보 수집
-        num_cols = 0
-        current_row = -1
-        current_col = 0
-        spans = {}  # (row, col) -> (rowspan, colspan)
-        active_rowspans = {}  # col -> (start_row, rowspan)
-        
-        i = 0
-        while i < len(html_tokens):
-            token = html_tokens[i]
-            
-            if token == '<tr>':
-                current_row += 1
-                current_col = 0
-                # 현재 행에서 활성화된 rowspan 확인
-                for col in range(num_cols):
-                    if col in active_rowspans:
-                        start_row, rowspan = active_rowspans[col]
-                        if current_row >= start_row + rowspan:
-                            del active_rowspans[col]
-                
-            elif token == '</tr>':
-                num_cols = max(num_cols, current_col)
-                
-            elif token == '<td' or token == '<td>':
-                # 현재 위치가 활성 rowspan 아래에 있는지 확인
-                while current_col in active_rowspans:
-                    start_row, rowspan = active_rowspans[current_col]
-                    if current_row < start_row + rowspan:
-                        current_col += 1
-                    else:
-                        del active_rowspans[col]
-                
-                colspan = 1
-                rowspan = 1
-                
-                if token == '<td':
-                    i += 1
-                    while i < len(html_tokens) and html_tokens[i] != '>':
-                        if 'colspan=' in html_tokens[i]:
-                            colspan = int(html_tokens[i].split('"')[1])
-                        elif 'rowspan=' in html_tokens[i]:
-                            rowspan = int(html_tokens[i].split('"')[1])
-                        i += 1
-                
-                # 현재 셀의 span 정보와 데이터 존재 여부 저장
-                spans[(current_row, current_col)] = (rowspan, colspan, 
-                    has_content[current_cell_idx] if current_cell_idx < len(has_content) else False)
-                current_cell_idx += 1
-                
-                if rowspan > 1:
-                    for c in range(current_col, current_col + colspan):
-                        active_rowspans[c] = (current_row, rowspan)
-                current_col += colspan
-            
-            i += 1
-            
-        num_rows = current_row + 1
-        
-        # 2. 그리드 생성 및 OTSL 토큰 채우기
-        grid = [[None] * num_cols for _ in range(num_rows)]
-        has_data = [[False] * num_cols for _ in range(num_rows)]
-        
-        # 각 행과 열을 순회하면서 OTSL 토큰 결정
-        for row in range(num_rows):
+        if token == '<tr>':
+            current_row += 1
+            current_col = 0
+            # 현재 행에서 활성화된 rowspan 확인
             for col in range(num_cols):
-                if grid[row][col] is not None:
-                    continue
-                    
-                # 위쪽 셀의 rowspan 확인
-                is_under_rowspan = False
-                if row > 0:
-                    for r in range(row-1, -1, -1):
-                        if (r, col) in spans:
-                            rowspan, _, _ = spans[(r, col)]
-                            if row < r + rowspan:
-                                is_under_rowspan = True
-                                grid[row][col] = 'U'
-                                break
-                
-                if is_under_rowspan:
-                    continue
-                
-                # 현재 위치에 새로운 셀이 있는 경우
-                if (row, col) in spans:
-                    grid[row][col] = 'C'
-                    rowspan, colspan, has_content = spans[(row, col)]
-                    has_data[row][col] = has_content
-                    
-                    # colspan 처리
-                    for c in range(col + 1, col + colspan):
-                        grid[row][c] = 'L'
-                
-                # 빈 셀 처리
-                elif grid[row][col] is None:
-                    grid[row][col] = 'C'
-                    has_data[row][col] = False
+                if col in active_rowspans:
+                    start_row, rowspan = active_rowspans[col]
+                    if current_row >= start_row + rowspan:
+                        del active_rowspans[col]
+            
+        elif token == '</tr>':
+            num_cols = max(num_cols, current_col)
+            
+        elif token == '<td' or token == '<td>':
+            # 현재 위치가 활성 rowspan 아래에 있는지 확인
+            while current_col in active_rowspans:
+                start_row, rowspan = active_rowspans[current_col]
+                if current_row < start_row + rowspan:
+                    current_col += 1
+                else:
+                    del active_rowspans[current_col]
+            
+            colspan = 1
+            rowspan = 1
+            
+            if token == '<td':
+                i += 1
+                while i < len(html_tokens) and html_tokens[i] != '>':
+                    if 'colspan=' in html_tokens[i]:
+                        colspan = int(html_tokens[i].split('"')[1])
+                    elif 'rowspan=' in html_tokens[i]:
+                        rowspan = int(html_tokens[i].split('"')[1])
+                    i += 1
+            
+            # 현재 셀의 span 정보와 데이터 존재 여부 저장
+            spans[(current_row, current_col)] = (rowspan, colspan, 
+                has_content[current_cell_idx] if current_cell_idx < len(has_content) else False)
+            current_cell_idx += 1
+            
+            if rowspan > 1:
+                for c in range(current_col, current_col + colspan):
+                    active_rowspans[c] = (current_row, rowspan)
+            current_col += colspan
         
-        # 3. OTSL 시퀀스 생성
-        otsl_tokens = []
-        for row in grid:
-            otsl_tokens.extend(token for token in row if token is not None)
+        i += 1
+        
+    num_rows = current_row + 1
+    
+    # 2. 그리드 생성 및 OTSL 토큰 채우기
+    grid = [[None] * num_cols for _ in range(num_rows)]
+    has_data = [[False] * num_cols for _ in range(num_rows)]
+    
+    # 그리드 생성 및 OTSL 토큰 채우기 부분 수정
+    for row in range(num_rows):
+        for col in range(num_cols):
+            if grid[row][col] is not None:
+                continue
+                
+            # 현재 셀이 어떤 span의 영향을 받는지 확인
+            affecting_spans = []  # [(row, col, rowspan, colspan), ...]
+            
+            # 위쪽 셀들의 rowspan 확인
+            if row > 0:
+                for r in range(row-1, -1, -1):
+                    if (r, col) in spans:
+                        rowspan, colspan, _ = spans[(r, col)]
+                        if row < r + rowspan:
+                            affecting_spans.append((r, col, rowspan, colspan))
+                            break
+
+            # 왼쪽 셀들의 colspan 확인
+            if col > 0:
+                for c in range(col-1, -1, -1):
+                    if (row, c) in spans:
+                        rowspan, colspan, _ = spans[(row, c)]
+                        if col < c + colspan:
+                            affecting_spans.append((row, c, rowspan, colspan))
+                            break
+            
+            # 태그 결정
+            if len(affecting_spans) == 2:
+                # 두 방향 모두에서 영향을 받는 경우
+                grid[row][col] = 'X'
+            elif len(affecting_spans) == 1:
+                # 한 방향에서만 영향을 받는 경우
+                span_row, span_col, rowspan, colspan = affecting_spans[0]
+                if span_row != row:  # 위쪽 셀의 영향
+                    grid[row][col] = 'U'
+                else:  # 왼쪽 셀의 영향
+                    grid[row][col] = 'L'
+            elif (row, col) in spans:
+                # 새로운 span의 시작점
+                grid[row][col] = 'C'
+                rowspan, colspan, has_content = spans[(row, col)]
+                has_data[row][col] = has_content
+                
+                # span 영역 채우기
+                for r in range(row, row + rowspan):
+                    for c in range(col, col + colspan):
+                        if r == row and c == col:
+                            continue  # 시작점은 이미 처리됨
+                        if r == row:
+                            grid[r][c] = 'L'  # 같은 행의 span
+                        elif c == col:
+                            grid[r][c] = 'U'  # 같은 열의 span
+                        else:
+                            grid[r][c] = 'X'  # 대각선 방향의 span
+            else:
+                # 일반 셀
+                grid[row][col] = 'C'
+                has_data[row][col] = False
+    
+    # OTSL 시퀀스 생성
+    otsl_tokens = []
+    has_data_1D_list = []
+   
+    for row_idx, row in enumerate(grid):
+        for col_idx, token in enumerate(row):
+            if token is not None:
+                otsl_tokens.append(token)
+                # C 토큰이고 원본 셀인 경우에만 has_data 체크
+                if token == 'C' and (row_idx, col_idx) in spans:
+                    _, _, has_content = spans[(row_idx, col_idx)]
+                    has_data_1D_list.append(has_content)
+                else:
+                    # C 토큰이 아니거나 원본 셀이 아닌 경우 항상 False
+                    has_data_1D_list.append(False)
+        
+        # NL 토큰 추가 (마지막 행 포함)
+        if row_idx < num_rows:
             otsl_tokens.append('NL')
-        
-        has_data_1D_list = []
-        for row in has_data:
-            row.append(False)  # NL 토큰에 대한 has_data
-            has_data_1D_list.extend(row)
-        
-        return " ".join(otsl_tokens), has_data_1D_list
-        
-    except Exception as e:
-        print(f"Error converting HTML to OTSL: {str(e)}")
-        return None
+            has_data_1D_list.append(False)
+    
+    # 길이 검증 (토큰 단위로)
+    if len(otsl_tokens) != len(has_data_1D_list):
+        print(f"Token length mismatch: tokens({len(otsl_tokens)}) != has_data({len(has_data_1D_list)})")
+        return None, []
+    
+    # 토큰 리스트를 문자열로 변환하여 반환
+    return otsl_tokens, has_data_1D_list
 
 def construct_table_html_gt(html_data: Dict) -> str:
     """원본 HTML 구조를 사용하여 GT 테이블 생성"""
@@ -512,77 +553,6 @@ def extract_spans_from_otsl(otsl_tokens: List[int], tokenizer: OTSLTokenizer) ->
             print(row)
         print(f"\nError: {str(e)}")
         raise
-    
-# def extract_spans_from_otsl(otsl_tokens: List[int], tokenizer: OTSLTokenizer) -> Tuple[np.ndarray, np.ndarray]:
-#     """OTSL 토큰에서 span matrix 추출"""
-#     # 1. OTSL 토큰을 그리드로 변환
-#     tokens = []
-#     for token_id in otsl_tokens:
-#         if token_id in tokenizer.id2token:
-#             token = tokenizer.id2token[token_id]
-#             if token not in ['[BOS]', '[EOS]', '[PAD]']:
-#                 tokens.append(token)
-    
-#     grid = []
-#     current_row = []
-#     for token in tokens:
-#         if token == 'NL':
-#             if current_row:
-#                 grid.append(current_row)
-#                 current_row = []
-#         else:
-#             current_row.append(token)
-#     if current_row:
-#         grid.append(current_row)
-    
-#     if not grid:
-#         return np.array([]), np.array([])
-    
-#     num_rows = len(grid)
-#     num_cols = len(grid[0])
-    
-#     # Row span matrix 생성
-#     row_span_matrix = np.ones((num_rows, num_cols))
-#     for i in range(num_rows):
-#         for j in range(num_cols):
-#             if grid[i][j] == 'C':
-#                 # 현재 셀부터 시작하여 연속된 span 크기 계산
-#                 span_size = 1
-#                 # 오른쪽으로 L 토큰 카운트
-#                 k = j + 1
-#                 while k < num_cols and grid[i][k] in ['L', 'X']:
-#                     span_size += 1
-#                     k += 1
-#                 # 시작 셀(C)과 모든 span된 셀(L)에 동일한 크기 할당
-#                 for c in range(j, k):
-#                     row_span_matrix[i][c] = span_size
-    
-#     # Column span matrix 생성
-#     col_span_matrix = np.ones((num_rows, num_cols))
-#     for i in range(num_rows):
-#         for j in range(num_cols):
-#             if grid[i][j] == 'C':
-#                 # 현재 셀부터 시작하여 연속된 span 크기 계산
-#                 span_size = 1
-#                 # 아래로 U 토큰 카운트
-#                 k = i + 1
-#                 while k < num_rows and grid[k][j] in ['U', 'X']:
-#                     span_size += 1
-#                     k += 1
-#                 # 시작 셀(C)과 모든 span된 셀(U)에 동일한 크기 할당
-#                 for r in range(i, k):
-#                     col_span_matrix[r][j] = span_size
-    
-#     # print("Grid:")
-#     # for row in grid:
-#     #     print(row)
-#     # print("Row span matrix:")
-#     # for row in row_span_matrix:
-#     #     print(row)
-#     # print("Column span matrix:")
-#     # for row in col_span_matrix:
-#     #     print(row)
-#     return row_span_matrix, col_span_matrix
 
 def compute_span_coefficients(
     row_span_matrix: np.ndarray,  # (num_rows, num_cols)
