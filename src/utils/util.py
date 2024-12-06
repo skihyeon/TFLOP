@@ -110,7 +110,7 @@ def extract_spans_from_html(html_structure: Dict) -> Tuple[List[Dict], np.ndarra
     
     return processed_cells, row_span_matrix, col_span_matrix
 
-def convert_html_to_otsl(ann: Dict) -> Tuple[Optional[str], List[bool]]:
+def convert_html_to_otsl(ann: Dict) -> Tuple[List[str], List[bool]]:
     """HTML 구조를 OTSL로 변환하고 데이터 존재 여부를 반환
     
     Args:
@@ -348,7 +348,7 @@ def construct_table_html_pred(
     """OTSL과 pointer logits를 사용하여 예측 테이블 생성"""
     try:
         # 1. OTSL 토큰을 그리드로 변환
-        tokens = [t for t in otsl_sequence.split() if t not in ['[BOS]', '[EOS]', '[PAD]']]
+        tokens = [t for t in otsl_sequence.split() if t not in ['[BOS]', '[EOS]', '[PAD]', '[UNK]']]
         grid = []
         current_row = []
         
@@ -360,6 +360,7 @@ def construct_table_html_pred(
         for token in tokens:
             if token == 'NL':
                 if current_row:
+                    current_row.append('NL')
                     grid.append(current_row)
                     current_row = []
                 current_row_idx += 1
@@ -475,186 +476,240 @@ def construct_table_html_pred(
 
 def extract_spans_from_otsl(otsl_tokens: List[int], tokenizer: OTSLTokenizer) -> Tuple[np.ndarray, np.ndarray]:
     """OTSL 토큰에서 span matrix 추출"""
-    try:
-        # 1. OTSL 토큰을 그리드로 변환
-        tokens = []
-        for token_id in otsl_tokens:
-            if token_id in tokenizer.id2token:
-                token = tokenizer.id2token[token_id]
-                if token not in ['[BOS]', '[EOS]', '[PAD]']:
-                    tokens.append(token)
-        
-        grid = []
-        current_row = []
-        for token in tokens:
-            if token == 'NL':
-                if current_row:
-                    grid.append(current_row)
-                    current_row = []
-            else:
-                current_row.append(token)
-        if current_row:
-            grid.append(current_row)
-        
-        if not grid:
-            return np.array([]), np.array([])
-        
-        num_rows = len(grid)
-        num_cols = len(grid[0])
-        
-        # Row span matrix 생성
-        row_span_matrix = np.ones((num_rows, num_cols))
-        for i in range(num_rows):
-            for j in range(num_cols):
-                if grid[i][j] == 'C':
-                    try:
-                        span_size = 1
-                        k = j + 1
-                        while k < num_cols and grid[i][k] in ['L', 'X']:
-                            span_size += 1
-                            k += 1
-                        for c in range(j, k):
-                            row_span_matrix[i][c] = span_size
-                    except Exception as e:
-                        print(f"Error in row span calculation at ({i}, {j}):")
-                        print(f"Grid shape: {num_rows}x{num_cols}")
-                        print(f"Current row: {grid[i]}")
-                        print(f"Error: {str(e)}")
-                        raise
-        
-        # Column span matrix 생성
-        col_span_matrix = np.ones((num_rows, num_cols))
-        for i in range(num_rows):
-            for j in range(num_cols):
-                if grid[i][j] == 'C':
-                    try:
-                        span_size = 1
-                        k = i + 1
-                        while k < num_rows and grid[k][j] in ['U', 'X']:
-                            span_size += 1
-                            k += 1
-                        for r in range(i, k):
-                            col_span_matrix[r][j] = span_size
-                    except Exception as e:
-                        print(f"Error in column span calculation at ({i}, {j}):")
-                        print(f"Grid shape: {num_rows}x{num_cols}")
-                        print(f"Current column: {[grid[r][j] for r in range(num_rows)]}")
-                        print(f"Error: {str(e)}")
-                        raise
-                        
-        return row_span_matrix, col_span_matrix
-        
-    except Exception as e:
-        print("\n=== Error in extract_spans_from_otsl ===")
-        print(f"Input tokens: {otsl_tokens}")
-        print(f"Decoded tokens: {tokens}")
-        print("\nGrid:")
-        for row in grid:
-            print(row)
-        print(f"\nError: {str(e)}")
-        raise
+    # 1. OTSL 토큰을 그리드로 변환
+    tokens = []
+    for token_id in otsl_tokens:
+        if token_id in tokenizer.id2token:
+            token = tokenizer.id2token[token_id]
+            if token not in ['[BOS]', '[EOS]', '[PAD]']:
+                tokens.append(token)
+    
+    # 그리드 생성 
+    grid = []
+    current_row = []
+    
+    for token in tokens:
+        if token == 'NL':
+            if current_row:
+                current_row.append('NL')  # NL 태그를 행의 마지막에 추가
+                grid.append(current_row)
+            current_row = []
+        else:
+            current_row.append(token)
+            
+    if current_row:  # 마지막 행 처리
+        current_row.append('NL')
+        grid.append(current_row)
+    
+    if not grid:
+        return np.array([]), np.array([])
+    
+    # print("Grid")
+    # print("=*10")
+    # for g in grid:
+    #     for c in g:
+    #         print(c, end=" ")
+    #     print()
+    # 모든 행의 길이가 같은지 확인
+    num_cols = len(grid[0])  # NL 포함
+    num_rows = len(grid)
+    
+    # Row span matrix 생성
+    row_span_matrix = np.ones((num_rows, num_cols))
+    for i in range(num_rows):
+        for j in range(num_cols):
+            if grid[i][j] == 'NL':
+                row_span_matrix[i][j] = 0  # NL은 span 0
+            elif grid[i][j] == 'C':
+                span_size = 1
+                k = i + 1
+                while k < num_rows and grid[k][j] in ['U', 'X']:
+                    span_size += 1
+                    k += 1
+                for c in range(i, k):
+                    row_span_matrix[c][j] = span_size
+
+    # Column span matrix 생성 
+    col_span_matrix = np.ones((num_rows, num_cols))
+    for i in range(num_rows):
+        for j in range(num_cols):
+            if grid[i][j] == 'NL':
+                col_span_matrix[i][j] = 0  # NL은 span 0
+            elif grid[i][j] == 'C':
+                span_size = 1
+                k = j + 1
+                while k < num_cols and grid[i][k] in ['L', 'X']:
+                    span_size += 1
+                    k += 1
+                for r in range(j, k):
+                    col_span_matrix[i][r] = span_size
+                    
+    return row_span_matrix, col_span_matrix
+
+
 
 def compute_span_coefficients(
-    row_span_matrix: np.ndarray,  # (num_rows, num_cols)
-    col_span_matrix: np.ndarray,  # (num_rows, num_cols)
-    box_indices: torch.Tensor,    # (N, M)
-    num_boxes: int                # N
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """실제 bbox 간의 coefficient matrix 계산 (many-to-one 관계 지원)"""
-    num_rows, num_cols = row_span_matrix.shape
-    device = box_indices.device  # box_indices의 device 사용
+    row_span_matrix: np.ndarray,  # (rows, cols)
+    col_span_matrix: np.ndarray,  # (rows, cols)
+) -> Tuple[np.ndarray, np.ndarray]:
+    """span coefficient matrices 계산
     
-    # box_indices를 flatten하고 유효한 인덱스만 선택
-    box_indices_flat = box_indices.view(-1)  # (N*M,)
-    valid_mask = box_indices_flat != -1
-    valid_indices = box_indices_flat[valid_mask]
+    Args:
+        row_span_matrix: 각 셀의 row span 값을 나타내는 행렬 (NL 태그 포함)
+        col_span_matrix: 각 셀의 column span 값을 나타내는 행렬 (NL 태그 포함)
+        
+    Returns:
+        row_coef: (rows, cols, rows, cols) - row-wise coefficients
+        col_coef: (rows, cols, rows, cols) - column-wise coefficients
+    """
+    rows, cols = row_span_matrix.shape
+    real_cols = cols - 1  # NL 태그 제외
     
-    if len(valid_indices) == 0:
-        return torch.zeros((num_boxes, num_boxes), device=device), torch.zeros((num_boxes, num_boxes), device=device)
+    # 결과 matrices 초기화
+    row_coef = np.zeros((rows, real_cols, rows, real_cols))
+    col_coef = np.zeros((rows, real_cols, rows, real_cols))
     
-    # 1D -> 2D 변환을 벡터화
-    rows = (valid_indices // num_cols).cpu().numpy()
-    cols = (valid_indices % num_cols).cpu().numpy()
-    
-    # 범위를 벗어나는 인덱스 필터링
-    valid_range = (rows < num_rows) & (cols < num_cols)
-    rows = rows[valid_range]
-    cols = cols[valid_range]
-    
-    # Span 정보 추출 (float32로 변환)
-    row_spans = row_span_matrix[rows, cols].astype(np.float32)  # (V,)
-    col_spans = col_span_matrix[rows, cols].astype(np.float32)  # (V,)
-    
-    # 행/열 매칭 행렬 생성 (V, V)
-    same_row = (rows[:, None] == rows[None, :])  # (V, V)
-    same_col = (cols[:, None] == cols[None, :])  # (V, V)
-    
-    # Span overlap 계산 (float32로 유지)
-    row_overlap = np.minimum(row_spans[:, None], row_spans[None, :])  # (V, V)
-    col_overlap = np.minimum(col_spans[:, None], col_spans[None, :])  # (V, V)
-    
-    # Coefficient 계산 (float32로 유지)
-    row_coef_valid = np.where(
-        same_row,
-        row_overlap / (row_spans[:, None] * row_spans[None, :]),
-        0
-    ).astype(np.float32)  # (V, V)
-    
-    col_coef_valid = np.where(
-        same_col,
-        col_overlap / (col_spans[:, None] * col_spans[None, :]),
-        0
-    ).astype(np.float32)  # (V, V)
-    
-    # 최종 크기의 coefficient 행렬 생성
-    row_coef = torch.zeros((num_boxes, num_boxes), dtype=torch.float32, device=device)
-    col_coef = torch.zeros((num_boxes, num_boxes), dtype=torch.float32, device=device)
-    
-    # box_indices의 원래 box 인덱스 복원 (device 일치시킴)
-    box_idx_map = torch.div(
-        torch.arange(len(box_indices_flat), device=device),
-        box_indices.size(1),
-        rounding_mode='floor'
-    )[valid_mask][valid_range]
-    
-    # 유효한 인덱스에 대해서만 값 할당 (many-to-one 관계 고려)
-    for i, (src_idx, tgt_idx) in enumerate(zip(box_idx_map.cpu(), box_idx_map.cpu())):
-        for j, (src_idx2, tgt_idx2) in enumerate(zip(box_idx_map.cpu(), box_idx_map.cpu())):
-            row_coef[src_idx, src_idx2] = max(row_coef[src_idx, src_idx2], torch.tensor(row_coef_valid[i, j], device=device))
-            col_coef[src_idx, src_idx2] = max(col_coef[src_idx, src_idx2], torch.tensor(col_coef_valid[i, j], device=device))
+    # 각 셀 pair에 대해 coefficient 계산
+    for i in range(rows):
+        for j in range(real_cols):
+            for p in range(rows):
+                for q in range(real_cols):
+                    # Row-wise coefficient 계산 (column 방향으로 투영)
+                    if i == p:  # 같은 행의 셀들
+                        # 1. 같은 span 내에 있는지 확인
+                        if (col_span_matrix[i,j] == col_span_matrix[p,q] and 
+                            row_span_matrix[i,j] == row_span_matrix[p,q]):
+                            # 시작점이 같은지 확인 (왼쪽으로 가면서)
+                            curr_j, curr_q = j, q
+                            while curr_j > 0 and col_span_matrix[i, curr_j-1] > 1:
+                                curr_j -= 1
+                            while curr_q > 0 and col_span_matrix[p, curr_q-1] > 1:
+                                curr_q -= 1
+                            
+                            if curr_j == curr_q:  # 같은 span 내에 있음
+                                row_coef[i,j,p,q] = 1.0
+                                continue
+                        
+                        # 2. column 방향으로 투영했을 때 overlap 계산
+                        span_i = row_span_matrix[i,j]  # 현재 셀의 row span
+                        span_p = row_span_matrix[p,q]  # 대상 셀의 row span
+                        
+                        # 두 셀이 column 방향으로 겹치는지 확인
+                        if min(i + span_i, p + span_p) > max(i, p):
+                            overlap = 1  # column-wise projection에서는 겹치면 1
+                            row_coef[i,j,p,q] = overlap / (span_i * span_p)
+                    
+                    # Column-wise coefficient 계산 (row 방향으로 투영)
+                    if j == q:  # 같은 열의 셀들
+                        # 1. 같은 span 내에 있는지 확인
+                        if (row_span_matrix[i,j] == row_span_matrix[p,q] and 
+                            col_span_matrix[i,j] == col_span_matrix[p,q]):
+                            # 시작점이 같은지 확인 (위로 올라가면서)
+                            curr_i, curr_p = i, p
+                            while curr_i > 0 and row_span_matrix[curr_i-1, j] > 1:
+                                curr_i -= 1
+                            while curr_p > 0 and row_span_matrix[curr_p-1, q] > 1:
+                                curr_p -= 1
+                            
+                            if curr_i == curr_p:  # 같은 span 내에 있음
+                                col_coef[i,j,p,q] = 1.0
+                                continue
+                        
+                        # 2. row 방향으로 투영했을 때 overlap 계산
+                        span_i = col_span_matrix[i,j]  # 현재 셀의 column span
+                        span_p = col_span_matrix[p,q]  # 대상 셀의 column span
+                        
+                        # 두 셀이 row 방향으로 겹치는지 확인
+                        if min(j + span_i, q + span_p) > max(j, q):
+                            overlap = min(j + span_i, q + span_p) - max(j, q)
+                            col_coef[i,j,p,q] = overlap / (span_i * span_p)
     
     return row_coef, col_coef
 
+def pad_coef_matrix(
+    coef: np.ndarray,  # (rows, cols, rows, cols)
+    target_size: int,  # 패딩 후 목표 크기
+) -> torch.Tensor:
+    """coefficient matrix를 목표 크기로 패딩"""
+    rows, cols, _, _ = coef.shape
+    padded = torch.full((target_size, target_size), -1)
+    
+    # 4D를 2D로 변환하면서 패딩
+    for i in range(rows):
+        for j in range(cols):
+            for p in range(rows):
+                for q in range(cols):
+                    if coef[i,j,p,q] > 0:
+                        # (i,j)와 (p,q)의 위치를 1D 인덱스로 변환
+                        idx1 = i * cols + j
+                        idx2 = p * cols + q
+                        padded[idx1, idx2] = coef[i,j,p,q]
+    
+    return padded
+
+
 def get_coef_matrix(
-    otsl_tokens: torch.Tensor,  # (B, L)
+    otsl_tokens: torch.Tensor,  # (B, 688)
     tokenizer: OTSLTokenizer,
-    box_indices: torch.Tensor,  # (B, N, M)
-    num_boxes: int
+    target_size: int,  # layout_prompt_length 
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """OTSL 토큰에서 span coefficient matrix 추출 (many-to-one 관계 지원)"""
+    """OTSL 토큰에서 span coefficient matrix 추출"""
     B = otsl_tokens.size(0)
     row_coefs, col_coefs = [], []
     
     for b in range(B):
         # 1. tensor -> list 변환 및 디코딩
         tokens = otsl_tokens[b].tolist()
-        
         # 2. span matrix 계산
         row_span_matrix, col_span_matrix = extract_spans_from_otsl(tokens, tokenizer)
-        
-        # 3. coefficient matrix 계산 (현재 배치의 box_indices 사용)
+        # print("="*50)
+        # print("row span matrix")
+        # print(row_span_matrix)
+        # print("col span matrix")
+        # print(col_span_matrix)
+        # 3. coefficient matrix 계산
         row_coef, col_coef = compute_span_coefficients(
             row_span_matrix=row_span_matrix,
-            col_span_matrix=col_span_matrix,
-            box_indices=box_indices[b],  # (N, M)
-            num_boxes=num_boxes
+            col_span_matrix=col_span_matrix
         )
+        # print("row coef shape")
+        # print(row_coef.shape)
+        # print("col coef shape")
+        # print(col_coef.shape)
+        # 4. 패딩
+        row_coef_padded = pad_coef_matrix(row_coef, target_size)
+        col_coef_padded = pad_coef_matrix(col_coef, target_size)
+        # print("row coef padded shape")
+        # print(row_coef_padded.shape)
+        # print("col coef padded shape")
+        # print(col_coef_padded.shape)
         
-        row_coefs.append(row_coef)
-        col_coefs.append(col_coef)
+        # print("\n=== Original Coefficient Matrices (before padding) ===")
+        # print("Row-wise coefficients:")
+        # for i in range(row_coef.shape[0]):
+        #     for j in range(row_coef.shape[1]):
+        #         if np.any(row_coef[i,j] > 0):  # 유효한 계수가 있는 경우만
+        #             print(f"Cell ({i},{j}) coefficients:")
+        #             for p in range(row_coef.shape[2]):
+        #                 for q in range(row_coef.shape[3]):
+        #                     if row_coef[i,j,p,q] > 0:
+        #                         print(f"  -> ({p},{q}): {row_coef[i,j,p,q]:.2f}")
+        
+        # print("\nColumn-wise coefficients:")
+        # for i in range(col_coef.shape[0]):
+        #     for j in range(col_coef.shape[1]):
+        #         if np.any(col_coef[i,j] > 0):  # 유효한 계수가 있는 경우만
+        #             print(f"Cell ({i},{j}) coefficients:")
+        #             for p in range(col_coef.shape[2]):
+        #                 for q in range(col_coef.shape[3]):
+        #                     if col_coef[i,j,p,q] > 0:
+        #                         print(f"  -> ({p},{q}): {col_coef[i,j,p,q]:.2f}")
+        # raise ValueError("debug")
+        row_coefs.append(row_coef_padded)
+        col_coefs.append(col_coef_padded)
     
-    # 4. 배치 단위로 stack
-    row_coefs = torch.stack(row_coefs)  # (B, N, N)
-    col_coefs = torch.stack(col_coefs)  # (B, N, N)
+    # 5. 배치 단위로 stack
+    row_coefs = torch.stack(row_coefs)  # (B, 688, 688)
+    col_coefs = torch.stack(col_coefs)  # (B, 688, 688)
     
     return row_coefs, col_coefs

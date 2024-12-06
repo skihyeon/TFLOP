@@ -111,7 +111,7 @@ class TFLOPLightningModule(pl.LightningModule):
                                             minlength=self.model.tokenizer.vocab_size)
                 
                 # Ground Truth 토큰 분포 (한 번에 계산)
-                true_tokens = batch['tokens'][0]
+                true_tokens = batch['token_ids'][0]
                 true_dist = torch.bincount(true_tokens.view(-1),
                                         minlength=self.model.tokenizer.vocab_size)
                 
@@ -123,7 +123,7 @@ class TFLOPLightningModule(pl.LightningModule):
                                                 minlength=self.model.tokenizer.vocab_size)
                         
                         # Ground Truth 토큰 분포
-                        true_tokens = batch['tokens'][i]
+                        true_tokens = batch['token_ids'][i]
                         true_dist = torch.bincount(true_tokens.view(-1),
                                                 minlength=self.model.tokenizer.vocab_size)
                         

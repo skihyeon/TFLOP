@@ -6,21 +6,25 @@ from pathlib import Path
 @dataclass
 class ModelConfig:
     """TFLOP 모델 설정"""
-    feature_dim: int = 1024      # 모델의 hidden dimension 크기
-    total_sequence_length: int = 1376  # 최대 시퀀스(토큰) 길이
-    image_size: int = 768       # 입력 이미지의 크기 (height=width)  # 논문 768
+    feature_dim: int = 688      # 모델의 hidden dimension 크기
+    total_sequence_length: int = 688  # 최대 시퀀스(토큰) 길이
+    image_size: int = 376       # 입력 이미지의 크기 (height=width)  # 논문 768
     temperature: float = 0.1    # Layout Pointer의 softmax temperature
     
     # Swin Transformer 설정
-    swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
-    # swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
+    # swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
+    swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
     # swin_model_name: str = "microsoft/swinv2-tiny-patch4-window16-256"
     
     # BART model 설정
-    encoder_layers: int = 6
-    decoder_layers: int = 6
-    encoder_attention_heads: int = 8
-    decoder_attention_heads: int = 8
+    # encoder_layers: int = 6
+    encoder_layers: int = 4
+    # decoder_layers: int = 6
+    decoder_layers: int = 4
+    # encoder_attention_heads: int = 8
+    encoder_attention_heads: int = 4
+    # decoder_attention_heads: int = 8
+    decoder_attention_heads: int = 4
     dropout: float = 0.1
 
     
@@ -54,19 +58,19 @@ class TrainingConfig:
     
     # Training
     total_steps: int = 100000
-    eval_steps: int = 1000
+    eval_steps: int = 200
     save_steps: int = 2000
     checkpoint_dir: str = "./checkpoints"
     
-    batch_size: int = 1
-    gradient_accumulation_steps: int = 16
-    learning_rate: float = 1e-4
+    batch_size: int = 4
+    gradient_accumulation_steps: int = 8
+    learning_rate: float = 1e-3
     warmup_steps: int = 0
     max_grad_norm: float = 0.5
     
     # Device & Hardware
     gpu_id: int = 0
-    num_workers: int = 4
+    num_workers: int = 12
     pin_memory: bool = True
     
     # Trainer 설정

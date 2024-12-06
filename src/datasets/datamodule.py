@@ -19,27 +19,23 @@ class TableDataModule(pl.LightningDataModule):
         
         # 토크나이저 직접 초기화
         self.tokenizer = OTSLTokenizer(
-            total_sequence_length=model_config.total_sequence_length
+            otsl_sequence_length=model_config.total_sequence_length // 2
         )
         
     def setup(self, stage: Optional[str] = None):
         if stage == 'fit' or stage is None:
-            # Train dataset 먼저 초기화하여 max_boxes 계산
             self.train_dataset = TableDataset(
                 data_dir=self.data_dir,
                 split='train',
-                total_sequence_length=self.model_config.total_sequence_length,
                 image_size=self.model_config.image_size,
-                max_boxes=None  # 자동 계산
+                tokenizer=self.tokenizer
             )
             
-            # Validation dataset은 train의 max_boxes 사용
             self.val_dataset = TableDataset(
                 data_dir=self.data_dir,
                 split='val',
-                total_sequence_length=self.model_config.total_sequence_length,
                 image_size=self.model_config.image_size,
-                max_boxes=self.train_dataset.max_boxes  # train에서 계산된 값 사용
+                tokenizer=self.tokenizer
             )
     
     def train_dataloader(self):

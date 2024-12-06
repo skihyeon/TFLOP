@@ -2,104 +2,148 @@ from typing import Dict, List, Union
 import torch
 from torch.utils.data import DataLoader
 from .dataset import TableDataset
-from torch.nn.utils.rnn import pad_sequence
 from models.otsl_tokenizer import OTSLTokenizer
+
+
 
 def collate_fn(batch, tokenizer):
     """
     Collate function for DataLoader
-    
-    Args:
-        batch: List of samples from TableDataset
-        tokenizer: OTSLTokenizer instance
     """
+    layout_prompt_length = otsl_sequence_length = tokenizer.otsl_sequence_length
     batch_size = len(batch)
-    max_boxes = max(sample['num_boxes'] for sample in batch)
     
-    # 1. Basic tensors
+    # 1. 기본 텐서들 한번에 처리
     images = torch.stack([sample['image'] for sample in batch])
+    num_boxes = torch.tensor([sample['num_boxes'] for sample in batch])
     
-    # 2. Tokenize and pad OTSL sequences
-    tokens = []
-    for sample in batch:
-        remaining_length = tokenizer.total_sequence_length - max_boxes
-        sample_tokens = tokenizer.encode(
-            sample['otsl_str'],
-            max_length=remaining_length
-        )
-        tokens.append(sample_tokens)
+    # 2. OTSL 시퀀스 토큰화 - 벡터화 처리
+    token_ids_list = torch.stack([
+        tokenizer.encode(sample['otsl_tokens_list'], padding=True, return_tensors='pt').squeeze(0)
+        for sample in batch
+    ])
     
-    max_seq_len = max(len(t) for t in tokens)
-    tokens = pad_sequence(
-        [torch.tensor(t) for t in tokens],
-        batch_first=True,
-        padding_value=tokenizer.pad_token_id
-    )
+    # 3. bboxes 패딩 - 벡터화 처리
+    padded_bboxes = torch.zeros(batch_size, layout_prompt_length, 4, dtype=torch.float32)
+    for i, (sample, n_box) in enumerate(zip(batch, num_boxes)):
+        padded_bboxes[i, :n_box] = torch.tensor(sample['bboxes'][:n_box])
     
-    # 3. Pad bboxes
-    padded_bboxes = torch.zeros(batch_size, max_boxes, 4, dtype=torch.float32)
-    for i, sample in enumerate(batch):
-        num_boxes = sample['num_boxes']
-        padded_bboxes[i, :num_boxes] = torch.tensor(sample['bboxes'])
+    # 4. box indices - 더 효율적인 처리
+    max_mappings = max(max(len(m) for m in sample['box_mappings']) for sample in batch)
+    box_indices = torch.full((batch_size, layout_prompt_length, max_mappings), -1)
     
-    device = padded_bboxes.device  # device 저장
+    # 5. attention mask와 data tag mask 통합 처리
+    total_length = layout_prompt_length + otsl_sequence_length
+    attention_mask = torch.zeros(batch_size, total_length, dtype=torch.bool)
+    data_tag_mask = torch.zeros(batch_size, total_length, dtype=torch.bool)
     
-    # 4. Create box indices tensor (many-to-one 매핑 지원)
-    max_mappings = max(max(len(mappings) for mappings in sample['box_mappings']) 
-                      for sample in batch)
-    box_indices = torch.full((batch_size, max_boxes, max_mappings), -1, 
-                           dtype=torch.long, device=device)
-    
-    # box_mappings에서 실제 text가 있는 data tag 위치로 매핑
-    for i, sample in enumerate(batch):
-        num_boxes = sample['num_boxes']
-        for box_idx, mappings in enumerate(sample['box_mappings']):
+    # 통합된 루프로 한번에 처리
+    for i, (sample, n_box) in enumerate(zip(batch, num_boxes)):
+        # Box indices 설정
+        for box_idx, mappings in enumerate(sample['box_mappings'][:n_box]):
             if mappings:
-                # sequence 내 위치를 num_boxes만큼 shift
-                seq_indices = [num_boxes + idx for idx in mappings]
-                box_indices[i, box_idx, :len(mappings)] = torch.tensor(
-                    seq_indices, dtype=torch.long, device=device
-                )
+                # seq_indices = torch.tensor([layout_prompt_length + idx for idx in mappings])
+                seq_indices = torch.tensor(mappings)
+                box_indices[i, box_idx, :len(seq_indices)] = seq_indices
+        
+        # Attention mask 설정
+        attention_mask[i, :n_box] = True
+        attention_mask[i, layout_prompt_length:][token_ids_list[i] != tokenizer.pad_token_id] = True
+        
+        # Data tag mask 설정
+        data_mask_indices = [j for j, (token_id, has_data) in 
+                           enumerate(zip(token_ids_list[i], sample['has_data_flags_list']))
+                           if token_id == tokenizer.c_token_id and has_data]
+        if data_mask_indices:
+            data_tag_mask[i, layout_prompt_length + torch.tensor(data_mask_indices)] = True
+
+
     
-    # 5. Create attention mask
-    attention_mask = torch.zeros(batch_size, tokenizer.total_sequence_length, 
-                               dtype=torch.bool, device=device)
-    for i, sample in enumerate(batch):
-        seq_len = sample['num_boxes'] + len(tokens[i])
-        attention_mask[i, :seq_len] = True
-    
-    # 6. Create data tag mask (text가 있는 C 태그 위치)
-    data_tag_mask = torch.zeros(batch_size, tokenizer.total_sequence_length, 
-                              dtype=torch.bool, device=device)
-    for i, (sample, sample_tokens) in enumerate(zip(batch, tokens)):
-        num_boxes = sample['num_boxes']
-        has_data = sample['has_data_flags']
-        has_data = has_data[:len(sample_tokens)]
-        for j, (token_id, has_data_flag) in enumerate(zip(sample_tokens, has_data)):
-            # print(f"token_id: {token_id}, has_data_flag: {has_data_flag}")
-            if token_id == tokenizer.c_token_id and has_data_flag:
-                data_tag_mask[i, num_boxes+j] = True
-    
-    # print("\nDataloader collate_fn:")
-    # for i, sample in enumerate(batch):
-        # print(f"\nBatch {i}:")
-        # print(f"num_boxes: {sample['num_boxes']}")
-        # print(f"box_mappings (sequence positions): {sample['box_mappings']}")
-        # print(f"box_indices (real mappings): {box_indices[i]}")
-        # true_positions = torch.where(data_tag_mask[i])[0]
-        # print(f"True positions in data_tag_mask: {true_positions}")
-    
-    return {
-        'images': images,
-        'tokens': tokens,
-        'bboxes': padded_bboxes,
-        'box_indices': box_indices,
-        'attention_mask': attention_mask,
-        'data_tag_mask': data_tag_mask,
-        'num_boxes': torch.tensor([sample['num_boxes'] for sample in batch]),
+    batch_dict =  {
+        'images': images,                     # (B, 3, 768, 768)
+        'token_ids': token_ids_list,          # (B, 688)
+        'bboxes': padded_bboxes,             # (B, 688, 4)
+        'box_indices': box_indices,           # (B, 688, max_mappings)
+        'attention_mask': attention_mask,      # (B, 1376)
+        'data_tag_mask': data_tag_mask,       # (B, 1376)
+        'num_boxes': num_boxes,               # (B)
         'cells': [sample['cells'] for sample in batch],
         'html': [sample['html'] for sample in batch]
     }
+    
+    return batch_dict
+# def collate_fn(batch, tokenizer):
+#     """
+#     Collate function for DataLoader
+    
+#     Args:
+#         batch: List of samples from TableDataset
+#         tokenizer: OTSLTokenizer instance
+#     """
+#     layout_prompt_length = otsl_sequence_length = tokenizer.otsl_sequence_length
+#     batch_size = len(batch)
+    
+#     # 1. Basic tensors
+#     images = torch.stack([sample['image'] for sample in batch])
+    
+#     # 2. Tokenize and pad OTSL sequences
+#     token_ids_list = torch.zeros((batch_size, otsl_sequence_length), dtype=torch.long)
+#     for i, sample in enumerate(batch):
+#         sample_token_ids = tokenizer.encode(
+#             sample['otsl_tokens_list'],
+#             padding=True,
+#             return_tensors='pt'
+#         )
+#         token_ids_list[i] = sample_token_ids.squeeze(0)  # (1, L) -> (L)
+
+#     # 3. Pad bboxes (1376 // 2 = 688)
+#     padded_bboxes = torch.zeros(batch_size, layout_prompt_length, 4, dtype=torch.float32)
+#     for i, sample in enumerate(batch):
+#         num_boxes = sample['num_boxes']       # 최대 688개
+#         padded_bboxes[i, :num_boxes] = torch.tensor(sample['bboxes'][:num_boxes]) 
+    
+#     # 4. Box indices
+#     ## 점검 필요
+#     max_mappings = max(max(len(mappings) for mappings in sample['box_mappings']) 
+#                       for sample in batch)                                          # batch 내 최대 mapping 개수
+#     box_indices = torch.full((batch_size, layout_prompt_length, max_mappings), -1)  # mapping 되지 않으면 -1    
+    
+#     for i, sample in enumerate(batch):
+#         num_boxes = sample['num_boxes']
+#         for box_idx, mappings in enumerate(sample['box_mappings'][:num_boxes]):
+#             if mappings:
+#                 seq_indices = [layout_prompt_length + idx for idx in mappings]
+#                 box_indices[i, box_idx, :len(seq_indices)] = torch.tensor(seq_indices)      # (B, 688, max_mappings)
+    
+#     # 5. Attention & data tag masks
+#     attention_mask = torch.zeros(batch_size, layout_prompt_length + otsl_sequence_length, dtype=torch.bool)
+#     data_tag_mask = torch.zeros(batch_size, layout_prompt_length + otsl_sequence_length, dtype=torch.bool)
+    
+#     for i, sample in enumerate(batch):
+#         num_boxes = sample['num_boxes']
+#         attention_mask[i, :num_boxes] = True
+        
+#         for j, token_id in enumerate(token_ids_list[i]):
+#             if token_id != tokenizer.pad_token_id:
+#                 attention_mask[i, layout_prompt_length + j] = True
+        
+#         # Data tag mask 채우기
+#         has_data = sample['has_data_flags_list']
+#         for j, (token_id, has_data_flag) in enumerate(zip(token_ids_list[i], has_data)):
+#             if token_id == tokenizer.c_token_id and has_data_flag:
+#                 data_tag_mask[i, layout_prompt_length + j] = True
+    
+#     return {
+#         'images': images,                            # (B, 3, 1024, 1024)
+#         'token_ids': token_ids_list,                   # (B, 688)
+#         'bboxes': padded_bboxes,                    # (B, 688, 4)
+#         'box_indices': box_indices,                   # (B, 688, )
+#         'attention_mask': attention_mask,              # (B, 1376)
+#         'data_tag_mask': data_tag_mask,                # (B, 1376)
+#         'num_boxes': torch.tensor([sample['num_boxes'] for sample in batch]),  # (N)
+#         'cells': [sample['cells'] for sample in batch],
+#         'html': [sample['html'] for sample in batch]
+#     }
 
 def create_dataloader(
     dataset: TableDataset,

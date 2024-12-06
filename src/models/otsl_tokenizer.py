@@ -28,14 +28,14 @@ class OTSLTokenizer:
     """
     def __init__(
         self,
-        total_sequence_length: int = 1376,  # 논문 4.2 Experimental Settings
+        otsl_sequence_length: int = 1376 // 2,  # 논문 4.2 Experimental Settings
         pad_token: str = "[PAD]",
         unk_token: str = "[UNK]",
         bos_token: str = "[BOS]",
         eos_token: str = "[EOS]",
     ):
         # 기본 설정
-        self.total_sequence_length = total_sequence_length
+        self.otsl_sequence_length = otsl_sequence_length
         
         # Special tokens
         self.special_tokens = {
@@ -148,14 +148,11 @@ class OTSLTokenizer:
         self,
         tokens: List[str],
         add_special_tokens: bool = True,
-        max_length: Optional[int] = None,
         padding: bool = True,
-        truncation: bool = True,
         return_tensors: Optional[str] = None
     ) -> Union[List[int], torch.Tensor]:
         """OTSL 시퀀스를 토큰 ID로 변환"""
-        if max_length is None:
-            max_length = self.max_length
+        max_length = self.otsl_sequence_length
             
         # Validate syntax
         if not self.validate_syntax(tokens):
@@ -165,8 +162,8 @@ class OTSLTokenizer:
         token_ids = []
         
         # Add BOS token
-        # if add_special_tokens:
-        #     token_ids.append(self.bos_token_id)
+        if add_special_tokens:
+            token_ids.append(self.bos_token_id)
             
         # Add OTSL tokens
         for token in tokens:
@@ -178,10 +175,6 @@ class OTSLTokenizer:
         # Add EOS token
         if add_special_tokens:
             token_ids.append(self.eos_token_id)
-            
-        # Truncate if needed
-        if truncation and len(token_ids) > max_length:
-            token_ids = token_ids[:max_length]
             
         # Pad if needed
         if padding and len(token_ids) < max_length:

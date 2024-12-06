@@ -30,7 +30,7 @@ def main():
         train_config=train_config
     )
     
-    datamodule.setup('fit')
+    # datamodule.setup('fit') 제거 - trainer가 알아서 호출할 것임
     
     model = TFLOPLightningModule(
         model_config=model_config,
