@@ -596,7 +596,7 @@ def compute_span_coefficients(
                         
                         # 두 셀이 column 방향으로 겹치는지 확인
                         if min(i + span_i, p + span_p) > max(i, p):
-                            overlap = 1  # column-wise projection에서는 겹치면 1
+                            overlap = min(i + span_i, p + span_p) - max(i, p) 
                             row_coef[i,j,p,q] = overlap / (span_i * span_p)
                     
                     # Column-wise coefficient 계산 (row 방향으로 투영)
@@ -656,7 +656,7 @@ def get_coef_matrix(
     """OTSL 토큰에서 span coefficient matrix 추출"""
     B = otsl_tokens.size(0)
     row_coefs, col_coefs = [], []
-    
+    shapes = []
     for b in range(B):
         # 1. tensor -> list 변환 및 디코딩
         tokens = otsl_tokens[b].tolist()
@@ -668,10 +668,12 @@ def get_coef_matrix(
         # print("col span matrix")
         # print(col_span_matrix)
         # 3. coefficient matrix 계산
+        shapes.append(row_span_matrix.shape)
         row_coef, col_coef = compute_span_coefficients(
             row_span_matrix=row_span_matrix,
             col_span_matrix=col_span_matrix
         )
+        
         # print("row coef shape")
         # print(row_coef.shape)
         # print("col coef shape")
@@ -712,4 +714,4 @@ def get_coef_matrix(
     row_coefs = torch.stack(row_coefs)  # (B, 688, 688)
     col_coefs = torch.stack(col_coefs)  # (B, 688, 688)
     
-    return row_coefs, col_coefs
+    return row_coefs, col_coefs, shapes

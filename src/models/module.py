@@ -13,11 +13,7 @@ class TFLOPLightningModule(pl.LightningModule):
         self.model_config = model_config
         self.train_config = train_config
         self.inference_mode = inference_mode
-        
-        # Dataset의 max_boxes를 모델 설정에 추가
-        if hasattr(train_config, 'dataset') and train_config.dataset is not None:
-            self.model_config.max_boxes = train_config.dataset.max_boxes
-        
+
         # Model components
         self.model = TFLOP(model_config, inference_mode)
         self.criterion = TFLOPLoss(
@@ -30,41 +26,21 @@ class TFLOPLightningModule(pl.LightningModule):
         ) 
         
     def forward(self, batch):
-        # 키 이름 변환
-        # model_inputs = {
-        #     'images': batch['images'],
-        #     'text_regions': batch['bboxes'],  # bboxes -> text_regions
-        #     'labels': batch.get('tokens', None),
-        #     'attention_mask': batch.get('attention_mask', None),
-        #     'row_span_coef': batch.get('row_span_coef', None),
-        #     'col_span_coef': batch.get('col_span_coef', None),
-        #     'data_tag_mask': batch.get('data_tag_mask', None),
-        #     'box_indices': batch.get('box_indices', None),
-        #     'cells': batch.get('cells', None),
-        #     'html': batch.get('html', None)
-        # }
         return self.model(batch)
         
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         outputs = self(batch)
-        batch_size = batch['images'].size(0)
         loss_dict = self.criterion(batch, outputs)
         
         for name, value in loss_dict.items():
-            # self.log(f"train/{name}", value, 
-            #         batch_size=batch_size,
-            #         on_step=True,
-            #         on_epoch=False,  # epoch 로 비활성화
-            #         prog_bar=(name == 'loss')
-            #         )
-            if name == 'loss': name = 'l'
-            elif name == 'cls_loss': name = 'cls'
-            elif name == 'ptr_loss': name = 'p'
-            elif name == 'empty_ptr_loss': name = 'e'
-            elif name == 'row_contr_loss': name = 'r'
-            elif name == 'col_contr_loss': name = 'c'
+            if name == 'loss': name = 'total_loss'
+            elif name == 'cls_loss': name = 'cls_loss'
+            elif name == 'ptr_loss': name = 'ptr_loss'
+            elif name == 'empty_ptr_loss': name = 'e_ptr_loss'
+            elif name == 'row_ctr_loss': name = 'row_ctr_loss'
+            elif name == 'col_ctr_loss': name = 'col_ctr_loss'
             self.log(f"{name}", value,
-                    batch_size=batch_size,
+                    batch_size=batch['images'].size(0),
                     on_step=True,
                     on_epoch=False,  # epoch 로깅 비활성화
                     prog_bar=True
@@ -74,30 +50,50 @@ class TFLOPLightningModule(pl.LightningModule):
     
     def validation_step(self, batch, batch_idx):
         outputs = self(batch)
-        batch_size = batch['images'].size(0)
         loss_dict = self.criterion(batch, outputs)
         
-        # pointer logits와 empty logits 계산
-        box_features = outputs['box_proj']      # (B, N, D)
-        tag_features = outputs['tag_proj']      # (B, T, D)
-        empty_proj = outputs['empty_proj']      # (B, 1, D)
-        
-        # pointer logits 계산 (temperature=0.1 사용)
-        pointer_logits = torch.matmul(box_features, tag_features.transpose(-2, -1)) / 0.1  # (B, N, T)
-        empty_logits = torch.matmul(tag_features, empty_proj.transpose(-2, -1)).squeeze(-1)  # (B, T)
-        
-        # 시각화를 위해 outputs에 추가
-        outputs['pointer_logits'] = pointer_logits
-        outputs['empty_logits'] = empty_logits
-        
-        # 1. Loss 로깅
         for name, value in loss_dict.items():
             self.log(f"val/{name}", value, 
-                    batch_size=batch_size,
+                    batch_size=batch['images'].size(0),
                     on_step=False,
                     on_epoch=True,
                     prog_bar=(name == 'loss'),
                     sync_dist=True)
+        for name, value in outputs.items():
+            if name == 'teds' or name == 'teds_s':
+                self.log(f"{name}", value,
+                        batch_size=batch['images'].size(0),
+                        on_step=False,
+                        on_epoch=True,
+                        prog_bar=True,
+                        sync_dist=True)
+        
+        outputs = self.valid_step_progressor(batch, outputs, batch_idx)
+        return outputs
+    
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW(
+            self.parameters(),
+            lr=self.train_config.learning_rate,
+            weight_decay=0.01
+        )
+        
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=self.train_config.total_steps,
+            eta_min=1e-6
+        )
+        
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step"
+            }
+        } 
+    
+    def valid_step_progressor(self, batch, outputs, batch_idx):
+        batch_size = batch['images'].size(0)
         
         # 2. TEDS 메트릭 계산 및 로깅
         try:
@@ -210,24 +206,3 @@ class TFLOPLightningModule(pl.LightningModule):
             self.log('val_teds_s', 0.0, batch_size=batch_size, on_step=True, on_epoch=False, prog_bar=True)
         
         return outputs
-    
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(
-            self.parameters(),
-            lr=self.train_config.learning_rate,
-            weight_decay=0.01
-        )
-        
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=self.train_config.total_steps,
-            eta_min=1e-6
-        )
-        
-        return {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step"
-            }
-        } 

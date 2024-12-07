@@ -14,7 +14,7 @@ def visualize_validation_sample(
         pred_otsl: str,
         true_otsl: str,
         pointer_logits: Optional[torch.Tensor],
-        empty_logits: Optional[torch.Tensor] = None,
+        empty_pointer_logits: Optional[torch.Tensor] = None,
         step: int = 0,
         viz_dir: Optional[Path] = None
     ) -> None:
@@ -51,7 +51,7 @@ def visualize_validation_sample(
     true_grid = tokens_to_grid(true_otsl)
     pred_grid = tokens_to_grid(pred_otsl)
     
-    def visualize_grid(ax, grid, boxes, pointer_logits=None, empty_logits=None, title=''):
+    def visualize_grid(ax, grid, boxes, pointer_logits=None, empty_pointer_logits=None, title=''):
         ax.imshow(img)
         ax.set_title(title)
         
@@ -97,8 +97,8 @@ def visualize_validation_sample(
                         # bbox가 없는 'C' 토큰 (빈 셀)
                         # Empty logits 정보 표시
                         empty_conf = None
-                        if empty_logits is not None:
-                            empty_conf = torch.sigmoid(empty_logits[0, j]).item()
+                        if empty_pointer_logits is not None:
+                            empty_conf = torch.sigmoid(empty_pointer_logits[0, j]).item()
                         
                         if j > 0 and (i,j-1) in cell_boxes:
                             prev_box = cell_boxes[(i,j-1)]
@@ -174,7 +174,7 @@ def visualize_validation_sample(
     
     # Prediction 시각화
     ax2 = plt.subplot(1, 2, 2)
-    visualize_grid(ax2, tokens_to_grid(pred_otsl), boxes, pointer_logits, empty_logits, title='Predicted Structure')
+    visualize_grid(ax2, tokens_to_grid(pred_otsl), boxes, pointer_logits, empty_pointer_logits, title='Predicted Structure')
     
     # 저장
     img_dir = viz_dir / "images"

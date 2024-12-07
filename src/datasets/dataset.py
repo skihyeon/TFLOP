@@ -14,7 +14,7 @@ import numpy as np
 # 디버그 모드 설정
 DEBUG = True
 DEBUG_SAMPLES = {
-    'train': 100000,
+    'train': 200000,
     'val': 100
 }
 

@@ -42,11 +42,11 @@ def main():
         ModelCheckpoint(
             dirpath=exp_dir / "checkpoints",
             filename=f'{train_config.exp_name}'+'_{step}',
-            save_top_k=-1,
-            # monitor='val/loss',
-            monitor = None,
+            save_top_k=3,  # 최대 3개의 체크포인트 저장
+            monitor='val/loss',
             mode='min',
             every_n_train_steps=train_config.save_steps,
+            save_on_train_epoch_end=False,  # step 기반 저장을 위해 필요
         ),
         ValidationVisualizationCallback(viz_dir=exp_dir / "visualizations")
     ]
@@ -101,7 +101,9 @@ def main():
         num_sanity_val_steps=train_config.num_sanity_val_steps,
         logger=logger,
         callbacks=callbacks,
-        check_val_every_n_epoch=None
+        check_val_every_n_epoch=None,
+        deterministic=True,
+        benchmark=False
     )
 
     if train_config.resume_training and train_config.resume_checkpoint_path:
@@ -117,5 +119,6 @@ def main():
 if __name__ == '__main__':
     from setproctitle import setproctitle
     setproctitle("TFLOP")
+    pl.seed_everything(42)
     torch.set_float32_matmul_precision('high')
     main()

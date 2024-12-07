@@ -41,11 +41,8 @@ class ValidationVisualizationCallback(Callback):
                 true_html=outputs['true_html'],
                 pred_otsl=outputs['pred_otsl'],
                 true_otsl=outputs['true_otsl'],
-                # box_proj=outputs.get('box_proj', None),
-                # tag_proj=outputs.get('tag_proj', None),
-                # empty_proj=outputs.get('empty_proj', None),
-                pointer_logits=outputs.get('pointer_logits', None),
-                empty_logits=outputs.get('empty_logits', None),
+                pointer_logits=outputs['pointer_logits'],
+                empty_pointer_logits=outputs['empty_pointer_logits'],
                 step=trainer.global_step,
                 viz_dir=self.viz_dir
             )
@@ -126,8 +123,8 @@ class ValidationVisualizationCallback(Callback):
                             <div class="title">Predicted Table</div>
                             {outputs['pred_html']}
                             <div class="pointer-info">
-                                <div>Pointer Confidence: {torch.softmax(outputs['box_proj'][0], dim=-1).max().item():.4f}</div>
-                                <div>Empty Pointer Confidence: {torch.sigmoid(outputs['empty_proj'][0]).max().item():.4f}</div>
+                                <div>Pointer Confidence: {torch.softmax(outputs['pointer_logits'][0], dim=-1).max().item():.4f}</div>
+                                <div>Empty Pointer Confidence: {torch.sigmoid(outputs['empty_pointer_logits'][0]).max().item():.4f}</div>
                             </div>
                         </div>
                         

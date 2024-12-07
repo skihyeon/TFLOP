@@ -1,7 +1,7 @@
 from typing import Dict, Optional, Union, Any, Tuple
 import torch
 import torch.nn as nn
-from transformers import SwinModel, BartModel, BartConfig
+from transformers import SwinModel, Swinv2Model, BartModel, BartConfig
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import shift_tokens_right
 from .layout_encoder import LayoutEncoder
@@ -11,6 +11,11 @@ import torch.nn.functional as F
 from utils.util import get_coef_matrix
 import math
 from .bart_decoder import TFLOPDecoder
+import matplotlib.pyplot as plt
+import seaborn as sns
+import torch
+import numpy as np
+from pathlib import Path
 
 class TFLOP(nn.Module):
     """
@@ -33,7 +38,8 @@ class TFLOP(nn.Module):
         self.layout_prompt_length = self.otsl_sequence_length = self.tokenizer.otsl_sequence_length
         
         # 1. Image Encoder (Swin Transformer)
-        self.image_encoder = SwinModel.from_pretrained(config.swin_model_name)
+        # self.image_encoder = SwinModel.from_pretrained(config.swin_model_name)
+        self.image_encoder = Swinv2Model.from_pretrained(config.swin_model_name)
         self.visual_proj = nn.Linear(
             self.image_encoder.config.hidden_size,
             config.feature_dim
@@ -109,6 +115,7 @@ class TFLOP(nn.Module):
         labels = batch['token_ids']         # (B, :688)
         attention_mask = batch['attention_mask']  # (B, 1376)
         data_tag_mask = batch['data_tag_mask']   # (B, 1376)
+        box_indices = batch['box_indices']
         
         B = images.size(0)
         
@@ -163,31 +170,31 @@ class TFLOP(nn.Module):
             tag_features = last_hidden_state[:, self.layout_prompt_length:, :]  # (B, 688, 1024)
             tag_logits = self.output_projection(tag_features)        # (B, 688, Vocab_size)
             
-            
-            box_proj, tag_proj, empty_proj = self.layout_pointer(
+            pointer_logits, empty_pointer_logits = self.layout_pointer(
                 decoder_hidden_states=last_hidden_state,
                 layout_prompt_length=self.layout_prompt_length
-            ) # (B, :688, 1024), (B, 688:, 1024), (B, 1, 1024)
+            ) 
 
             # Contrastive learning을 위한 similarity matrix 계산 (실제 box 수 기준)
             row_sim_matrix, col_sim_matrix = self.get_sim_matrix(
                 box_features,
                 attention_mask = attention_mask[:, :self.layout_prompt_length]
             )
-            
+
             # # Span coefficient 계산 (실제 box 수 기준)
-            row_span_coef, col_span_coef = get_coef_matrix(
+            row_span_coef, col_span_coef, shapes = get_coef_matrix(
                 labels, # (B, 688)
                 self.tokenizer, 
                 self.layout_prompt_length            # (B, 688, M)
             )
+
+            self.visualize_tag_logits(images, tag_logits, shapes)
                         
             # Return outputs for loss calculation
             outputs = {
                 'tag_logits': tag_logits,                # (B, 688, 9) - vocabulary logits
-                'box_proj': box_proj,                    # (B, :688, 1024) - decoder의 box features
-                'tag_proj': tag_proj,                    # (B, 688:, 1024) - decoder의 tag features
-                'empty_proj': empty_proj,                # (B, 1, 1024) - empty cell embedding
+                'pointer_logits': pointer_logits,        # (B, 688, 688) - pointer logits
+                'empty_pointer_logits': empty_pointer_logits,  # (B, 1, 688) - empty pointer logits
                 'data_tag_mask': data_tag_mask,          # (B, 1376)
                 'row_sim_matrix': row_sim_matrix,        # (B, 688, 688) - row-wise similarity
                 'col_sim_matrix': col_sim_matrix,        # (B, 688, 688) - column-wise similarity
@@ -261,3 +268,88 @@ class TFLOP(nn.Module):
         mask[layout_prompt_length:, layout_prompt_length:] = otsl_mask * -1e4
         
         return mask.unsqueeze(0).unsqueeze(1).expand(batch_size, 1, total_length, total_length)  # (B, 1, 1376, 1376)
+    
+
+    def visualize_tag_logits(self, image, tag_logits, shapes, save_dir="checkpoints/heatmaps"):
+        """
+        Tag logits의 분포를 테이블 구조를 반영한 2D 히트맵으로 시각화
+        
+        """
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        # # CPU로 이동 및 numpy 변환
+        # image = image.cpu().numpy()
+        # tag_logits = tag_logits.detach().cpu().numpy()
+        
+        for b in range(len(image)):
+            
+            # num_rows, num_cols = shapes[b]
+            # num_cols = num_cols - 1 
+            # # 이미지 전처리
+            # img = image[b].transpose(1, 2, 0)
+            # img = (img - img.min()) / (img.max() - img.min())
+            
+            # # Tag logits 처리
+            logits = tag_logits[b]  # (seq_len, vocab_size)
+            
+            # # 가장 높은 확률을 가진 토큰 인덱스
+            # pred_tokens = np.argmax(logits, axis=1)
+            
+            # # 2D 구조로 재구성 (num_rows x num_cols)
+            # token_map = pred_tokens[:num_rows * num_cols].reshape(num_rows, num_cols)
+            # confidence_map = np.max(logits, axis=1)[:num_rows * num_cols].reshape(num_rows, num_cols)
+            
+            # # Subplot 구성 (1x3)ㄹ
+            # fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(30, 10))
+            
+            # # 1. 원본 이미지
+            # ax1.imshow(img)
+            # ax1.set_title("Input Image")
+            # ax1.axis('off')
+            
+            # # 2. 예측된 토큰 분포 (2D)
+            token_names = ['PAD', 'UNK', 'BOS', 'EOS', 'C', 'L', 'U', 'NL']
+            # sns.heatmap(
+            #     token_map,
+            #     ax=ax2,
+            #     cmap='Set3',
+            #     cbar=True,
+            #     xticklabels=False,
+            #     yticklabels=False,
+            #     cbar_kws={'ticks': range(len(token_names)), 'label': 'Token Type'}
+            # )
+            # ax2.set_title("Predicted Token Distribution (2D)")
+            
+            # # Colorbar의 tick label 수정
+            # colorbar = ax2.collections[0].colorbar
+            # colorbar.set_ticklabels(token_names)
+            
+            # # 3. Confidence 분포 (2D)
+            # sns.heatmap(
+            #     confidence_map,
+            #     ax=ax3,
+            #     cmap='viridis',
+            #     cbar=True,
+            #     xticklabels=False,
+            #     yticklabels=False,
+            #     cbar_kws={'label': 'Confidence'}
+            # )
+            # ax3.set_title("Prediction Confidence (2D)")
+            
+            # plt.tight_layout()
+            # plt.savefig(save_dir / f"heatmap_batch_{b}.png", dpi=300, bbox_inches='tight')
+            # plt.close()
+            
+            # 통계 정보 저장
+            with open(save_dir / f"stats_batch_{b}.txt", "w") as f:
+                f.write(f"Tag Logits Statistics:\n")
+                f.write(f"Mean: {logits.mean():.4f}\n")
+                f.write(f"Std: {logits.std():.4f}\n")
+                f.write(f"Min: {logits.min():.4f}\n")
+                f.write(f"Max: {logits.max():.4f}\n")
+                
+                mean_per_vocab = logits.mean(axis=0)
+                f.write("\nMean logit per vocabulary:\n")
+                for i, vocab in enumerate(token_names):
+                    f.write(f"{vocab}: {mean_per_vocab[i]:.4f}\n")
