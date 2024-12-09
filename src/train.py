@@ -30,8 +30,6 @@ def main():
         train_config=train_config
     )
     
-    # datamodule.setup('fit') 제거 - trainer가 알아서 호출할 것임
-    
     model = TFLOPLightningModule(
         model_config=model_config,
         train_config=train_config,
@@ -41,12 +39,12 @@ def main():
     callbacks = [
         ModelCheckpoint(
             dirpath=exp_dir / "checkpoints",
-            filename=f'{train_config.exp_name}'+'_{step}',
-            save_top_k=3,  # 최대 3개의 체크포인트 저장
-            monitor='val/loss',
-            mode='min',
-            every_n_train_steps=train_config.save_steps,
-            save_on_train_epoch_end=False,  # step 기반 저장을 위해 필요
+            filename=f'{train_config.exp_name}' + '_{epoch}',
+            save_top_k=-1,  # 모든 체크포인트 저장
+            every_n_epochs=1,  # 매 epoch마다 저장
+            save_on_train_epoch_end=True,
+            save_last=True,  # 마지막 체크포인트는 따로 저장
+            save_weights_only=True  # 모델 가중치만 저장
         ),
         ValidationVisualizationCallback(viz_dir=exp_dir / "visualizations")
     ]
@@ -60,7 +58,7 @@ def main():
                 "train_config": train_config.to_dict()
             }
         )
-        callbacks.append(LearningRateMonitor(logging_interval='step'))
+        callbacks.append(LearningRateMonitor(logging_interval='epoch'))
     else:
         logger = False
     
@@ -90,18 +88,18 @@ def main():
             f.write(f"{key:25s}: {value}\n")
     
     trainer = pl.Trainer(
-        max_steps=train_config.total_steps,
+        max_epochs=train_config.num_epochs,  # step 대신 epoch 사용
         accelerator=train_config.accelerator,
         devices=train_config.devices,
         strategy=train_config.strategy,
         precision=train_config.precision,
         accumulate_grad_batches=train_config.accumulate_grad_batches,
         gradient_clip_val=train_config.gradient_clip_val,
-        val_check_interval=train_config.eval_steps,
+        check_val_every_n_epoch=1,  # 매 epoch마다 validation 수행
         num_sanity_val_steps=train_config.num_sanity_val_steps,
         logger=logger,
         callbacks=callbacks,
-        check_val_every_n_epoch=None,
+        enable_checkpointing=True,
         deterministic=True,
         benchmark=False
     )
@@ -115,6 +113,7 @@ def main():
         )
     else:
         trainer.fit(model, datamodule=datamodule)
+
 
 if __name__ == '__main__':
     from setproctitle import setproctitle

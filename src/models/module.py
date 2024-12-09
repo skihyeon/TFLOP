@@ -5,6 +5,7 @@ from .tflop import TFLOP
 from .losses import TFLOPLoss
 from metrics.teds import compute_teds, compute_teds_struct
 from utils.util import construct_table_html_pred, construct_table_html_gt
+import torchmetrics
 
 class TFLOPLightningModule(pl.LightningModule):
     def __init__(self, model_config: Any, train_config: Any, inference_mode: bool = False):
@@ -24,6 +25,9 @@ class TFLOPLightningModule(pl.LightningModule):
             lambda_col_contr=model_config.lambda_col_contr,
             tokenizer=self.model.tokenizer
         ) 
+                # Metric 초기화
+        self.val_teds = torchmetrics.MeanMetric()
+        self.val_teds_struct = torchmetrics.MeanMetric()
         
     def forward(self, batch):
         return self.model(batch)
@@ -32,44 +36,121 @@ class TFLOPLightningModule(pl.LightningModule):
         outputs = self(batch)
         loss_dict = self.criterion(batch, outputs)
         
+        # Loss logging (epoch 단위)
         for name, value in loss_dict.items():
-            if name == 'loss': name = 'total_loss'
-            elif name == 'cls_loss': name = 'cls_loss'
-            elif name == 'ptr_loss': name = 'ptr_loss'
-            elif name == 'empty_ptr_loss': name = 'e_ptr_loss'
-            elif name == 'row_ctr_loss': name = 'row_ctr_loss'
-            elif name == 'col_ctr_loss': name = 'col_ctr_loss'
-            self.log(f"{name}", value,
+            self.log(f"train/{name}", value,
                     batch_size=batch['images'].size(0),
                     on_step=True,
-                    on_epoch=False,  # epoch 로깅 비활성화
-                    prog_bar=True
-                    )
+                    on_epoch=True,
+                    prog_bar=True)
         
         return loss_dict
     
     def validation_step(self, batch, batch_idx):
         outputs = self(batch)
         loss_dict = self.criterion(batch, outputs)
+        batch_size = batch['images'].size(0)
         
+        # Loss logging
         for name, value in loss_dict.items():
             self.log(f"val/{name}", value, 
-                    batch_size=batch['images'].size(0),
+                    batch_size=batch_size,
                     on_step=False,
                     on_epoch=True,
                     prog_bar=(name == 'loss'),
                     sync_dist=True)
-        for name, value in outputs.items():
-            if name == 'teds' or name == 'teds_s':
-                self.log(f"{name}", value,
-                        batch_size=batch['images'].size(0),
-                        on_step=False,
-                        on_epoch=True,
-                        prog_bar=True,
-                        sync_dist=True)
         
-        outputs = self.valid_step_progressor(batch, outputs, batch_idx)
-        return outputs
+        # 첫 번째 배치에 대해서만 시각화 정보 준비
+        visualization_outputs = {}
+        if batch_idx == 0:
+            try:
+                # 첫 번째 샘플에 대한 예측/정답 준비
+                pred_tokens = outputs['tag_logits'][0].argmax(dim=-1)
+                true_tokens = batch['token_ids'][0]
+                
+                # 토큰 분포 계산
+                token_dist = torch.bincount(pred_tokens.view(-1), 
+                                        minlength=self.model.tokenizer.vocab_size)
+                true_dist = torch.bincount(true_tokens.view(-1),
+                                        minlength=self.model.tokenizer.vocab_size)
+                
+                # 토큰 분포 출력
+                print("\n=== Token Distribution Debug ===")
+                print("Token Distributions (Pred | True):")
+                for token_id in range(self.model.tokenizer.vocab_size):
+                    pred_count = token_dist[token_id].item()
+                    true_count = true_dist[token_id].item()
+                    if pred_count > 0 or true_count > 0:
+                        token = self.model.tokenizer.id2token[token_id]
+                        print(f"  {token:8s}: {pred_count:4d} | {true_count:4d}")
+
+                pred_otsl = self.model.tokenizer.decode(pred_tokens.cpu().tolist())
+                
+                # 필요한 정보들이 모두 있는지 확인
+                if all(k in batch for k in ['cells', 'html', 'otsl']):
+                    text_regions = batch['cells'][0]
+                    
+                    # HTML 생성
+                    pred_html = construct_table_html_pred(
+                        pred_otsl,
+                        text_regions,
+                        outputs['pointer_logits'][0]
+                    )
+                    true_html = construct_table_html_gt(batch['html'][0])
+                    
+                    # TEDS 계산
+                    teds = compute_teds(pred_html, true_html)
+                    teds_struct = compute_teds_struct(pred_html, true_html)
+                    
+                    # 시각화에 필요한 정보들 저장
+                    visualization_outputs.update({
+                        'pred_html': pred_html,
+                        'true_html': true_html,
+                        'pred_otsl': pred_otsl,
+                        'true_otsl': batch['otsl'][0],
+                        'pointer_logits': outputs['pointer_logits'][0],
+                        'empty_pointer_logits': outputs['empty_pointer_logits'][0],
+                        'teds': teds,
+                        'teds_s': teds_struct
+                    })
+            
+            except Exception as e:
+                print(f"Error constructing pred HTML: {str(e)}")
+        
+        # TEDS 메트릭 업데이트 (전체 배치)
+        for i in range(batch_size):
+            try:
+                pred_tokens = outputs['tag_logits'][i].argmax(dim=-1)
+                pred_otsl = self.model.tokenizer.decode(pred_tokens.cpu().tolist())
+                text_regions = batch['cells'][i]
+                pred_html = construct_table_html_pred(
+                    pred_otsl,
+                    text_regions,
+                    outputs['pointer_logits'][i]
+                )
+                true_html = construct_table_html_gt(batch['html'][i])
+                
+                teds = compute_teds(pred_html, true_html)
+                teds_struct = compute_teds_struct(pred_html, true_html)
+                
+                self.val_teds.update(teds)
+                self.val_teds_struct.update(teds_struct)
+                
+            except Exception as e:
+                print(f"Warning: TEDS calculation failed for sample {i}: {str(e)}")
+                self.val_teds.update(0.0)
+                self.val_teds_struct.update(0.0)
+        
+        return {**loss_dict, **visualization_outputs}
+
+    def on_validation_epoch_end(self):
+        # Log metrics
+        self.log("val/teds", self.val_teds.compute(), prog_bar=True)
+        self.log("val/teds_struct", self.val_teds_struct.compute(), prog_bar=True)
+        
+        # Reset metrics
+        self.val_teds.reset()
+        self.val_teds_struct.reset()
     
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -80,7 +161,7 @@ class TFLOPLightningModule(pl.LightningModule):
         
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer,
-            T_max=self.train_config.total_steps,
+            T_max=self.train_config.num_epochs,  # total_steps 대신 num_epochs 사용
             eta_min=1e-6
         )
         
@@ -88,9 +169,9 @@ class TFLOPLightningModule(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "step"
+                "interval": "epoch"  # step 대신 epoch 단위로 변경
             }
-        } 
+        }
     
     def valid_step_progressor(self, batch, outputs, batch_idx):
         batch_size = batch['images'].size(0)
