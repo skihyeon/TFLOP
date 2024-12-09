@@ -86,6 +86,10 @@ class OTSLTokenizer:
         self.u_token_id = self.token2id["U"]
         self.x_token_id = self.token2id["X"]
         self.nl_token_id = self.token2id["NL"]
+
+        self.otsl_token_ids = [self.pad_token_id, self.unk_token_id, self.bos_token_id, self.eos_token_id,
+                              self.c_token_id, self.l_token_id, self.u_token_id,
+                              self.x_token_id, self.nl_token_id]
     
     def validate_syntax(self, tokens: List[str]) -> bool:
         """OTSL 문법 규칙 검증"""
