@@ -94,7 +94,7 @@ def _html_to_tree_impl(html: str) -> Optional[Node]:
         print(f"Problematic HTML: {html}")
         return None
 
-@lru_cache(maxsize=1024)
+@lru_cache(maxsize=4096)
 def html_to_tree(html: str) -> Optional[Node]:
     """캐시를 사용하는 HTML 트리 변환 함수"""
     return _html_to_tree_impl(html)
@@ -116,6 +116,8 @@ def compute_tree_edit_distance(tree1: Node, tree2: Node) -> int:
         get_label=get_label
     )
 
+
+@lru_cache(maxsize=4096)
 def compute_teds(pred_html: str, true_html: str) -> Optional[float]:
     """TEDS 계산"""
     try:
@@ -145,7 +147,7 @@ def compute_teds(pred_html: str, true_html: str) -> Optional[float]:
         print(f"Error computing TEDS: {e}")
         return None
 
-
+@lru_cache(maxsize=4096)
 def compute_teds_struct(pred_html: str, true_html: str) -> Optional[float]:
     """TEDS-Struct 계산"""
     def remove_text(html: str) -> str:

@@ -341,138 +341,158 @@ def construct_table_html_gt(html_data: Dict) -> str:
 
 def construct_table_html_pred(
     otsl_sequence: str,
-    text_regions: List[Dict[str, Union[str, List[float]]]],
+    bbox_with_text: List[Dict[str, Union[str, List[float]]]],
     pointer_logits: torch.Tensor,
     confidence_threshold: float = 0.5
 ) -> str:
     """OTSL과 pointer logits를 사용하여 예측 테이블 생성"""
-    try:
-        # 1. OTSL 토큰을 그리드로 변환
-        tokens = [t for t in otsl_sequence.split() if t not in ['[BOS]', '[EOS]', '[PAD]', '[UNK]']]
-        grid = []
-        current_row = []
+    # try:
+    # 1. OTSL 토큰을 그리드로 변환
+    tokens = [t for t in otsl_sequence.split() if t not in ['[BOS]', '[EOS]', '[PAD]', '[UNK]']]
+    grid = []
+    current_row = []
+    
+    # 2. 토큰 인덱스와 그리드 위치 매핑 (모든 태그 포함)
+    token_positions = {}  # token_idx -> (row, col) 매핑
+    token_idx = 0
+    current_row_idx = 0
+    
+    for token in tokens:
+        if token == 'NL':
+            if current_row:
+                current_row.append('NL')
+                grid.append(current_row)
+                current_row = []
+            current_row_idx += 1
+            token_positions[token_idx] = (-1, -1)  # NL 태그 위치 표시
+        else:
+            current_row.append(token)
+            token_positions[token_idx] = (current_row_idx, len(current_row) - 1)
+        token_idx += 1
         
-        # 2. 토큰 인덱스와 그리드 위치 매핑 (모든 태그 포함)
-        token_positions = {}  # token_idx -> (row, col) 매핑
-        token_idx = 0
-        current_row_idx = 0
-        
-        for token in tokens:
-            if token == 'NL':
-                if current_row:
-                    current_row.append('NL')
-                    grid.append(current_row)
-                    current_row = []
-                current_row_idx += 1
-                token_positions[token_idx] = (-1, -1)  # NL 태그 위치 표시
-            else:
-                current_row.append(token)
-                token_positions[token_idx] = (current_row_idx, len(current_row) - 1)
-            token_idx += 1
-            
-        if current_row:
-            grid.append(current_row)
+    if current_row:
+        grid.append(current_row)
 
-        # 3. 각 셀의 원본 셀(병합의 시작점) 찾기
-        origin_cells = {}  # (row, col) -> (origin_row, origin_col)
+    # 3. 각 셀의 원본 셀(병합의 시작점) 찾기
+    origin_cells = {}  # (row, col) -> (origin_row, origin_col)
+    
+    def find_origin_cell(row: int, col: int) -> Tuple[int, int]:
+        if (row, col) in origin_cells:
+            return origin_cells[(row, col)]
         
-        def find_origin_cell(row: int, col: int) -> Tuple[int, int]:
-            if (row, col) in origin_cells:
-                return origin_cells[(row, col)]
-            
-            token = grid[row][col]
-            if token == 'C':
-                origin_cells[(row, col)] = (row, col)
-                return (row, col)
-            
-            if token == 'L':
-                origin = find_origin_cell(row, col-1)
-                origin_cells[(row, col)] = origin
-                return origin
-            
-            if token == 'U':
-                origin = find_origin_cell(row-1, col)
-                origin_cells[(row, col)] = origin
-                return origin
-            
-            if token == 'X':
-                left_origin = find_origin_cell(row, col-1)
-                up_origin = find_origin_cell(row-1, col)
-                origin = min(left_origin, up_origin)
-                origin_cells[(row, col)] = origin
-                return origin
-            
+        token = grid[row][col]
+        if token == 'C':
+            origin_cells[(row, col)] = (row, col)
             return (row, col)
-
-        # 4. 모든 셀의 원본 찾기
-        for i in range(len(grid)):
-            for j in range(len(grid[i])):
-                if (i, j) not in origin_cells:
-                    find_origin_cell(i, j)
-
-        # 5. 각 원본 셀의 rowspan과 colspan 계산
-        spans = {}  # (origin_row, origin_col) -> (rowspan, colspan)
-        for origin in set(origin_cells.values()):
-            spans[origin] = [1, 1]  # [rowspan, colspan]
         
-        for (row, col), (origin_row, origin_col) in origin_cells.items():
-            current_span = spans[(origin_row, origin_col)]
-            current_span[0] = max(current_span[0], row - origin_row + 1)
-            current_span[1] = max(current_span[1], col - origin_col + 1)
-
-        # 6. pointer_logits를 사용하여 text_cells 매핑 생성
-        text_cells = {}  # (row, col) -> text_idx 매핑
-        pointer_probs = torch.softmax(pointer_logits, dim=1)
+        if token == 'L':
+            origin = find_origin_cell(row, col-1)
+            origin_cells[(row, col)] = origin
+            return origin
         
-        for box_idx in range(pointer_probs.size(0)):
-            max_prob, cell_idx = pointer_probs[box_idx].max(dim=0)
-            if max_prob.item() >= confidence_threshold and cell_idx < len(token_positions):
-                token_idx = cell_idx.item()
-                if token_idx in token_positions:
-                    row, col = token_positions[token_idx]
-                    if row != -1:
-                        text_cells[(row, col)] = box_idx
-
-        # 7. HTML 테이블 생성
-        html = ["<table>"]
-        processed = set()
+        if token == 'U':
+            origin = find_origin_cell(row-1, col)
+            origin_cells[(row, col)] = origin
+            return origin
         
-        for i, row in enumerate(grid):
-            html.append("<tr>")
-            for j, token in enumerate(row):
-                if (i, j) in processed:
-                    continue
-                
-                if token == 'C':
-                    rowspan, colspan = spans[(i, j)]
-                    cell_tag = "<td"
-                    
-                    if rowspan > 1:
-                        cell_tag += f" rowspan='{rowspan}'"
-                    if colspan > 1:
-                        cell_tag += f" colspan='{colspan}'"
-                    
-                    cell_tag += ">"
-                    
-                    if (i, j) in text_cells:
-                        text_idx = text_cells[(i, j)]
-                        text = text_regions[text_idx].get('text', '').strip()
-                        html.append(f"{cell_tag}{text}</td>")
+        if token == 'X':
+            left_origin = find_origin_cell(row, col-1)
+            up_origin = find_origin_cell(row-1, col)
+            origin = min(left_origin, up_origin)
+            origin_cells[(row, col)] = origin
+            return origin
+        
+        return (row, col)
+
+    # 4. 모든 셀의 원본 찾기
+    for i in range(len(grid)):
+        for j in range(len(grid[i])):
+            if (i, j) not in origin_cells:
+                find_origin_cell(i, j)
+
+    # 5. 각 원본 셀의 rowspan과 colspan 계산
+    spans = {}  # (origin_row, origin_col) -> (rowspan, colspan)
+    for origin in set(origin_cells.values()):
+        spans[origin] = [1, 1]  # [rowspan, colspan]
+    
+    for (row, col), (origin_row, origin_col) in origin_cells.items():
+        current_span = spans[(origin_row, origin_col)]
+        current_span[0] = max(current_span[0], row - origin_row + 1)
+        current_span[1] = max(current_span[1], col - origin_col + 1)
+
+    # 6. pointer_logits를 사용하여 text_cells 매핑 생성
+    text_cells = {}  # (row, col) -> text_idx 매핑
+    pointer_probs = torch.softmax(pointer_logits, dim=1)
+    
+    
+    # 디버깅을 위한 출력 추가
+    # print("\nPointer Probabilities:")
+    for box_idx in range(pointer_probs.size(0)):
+        max_prob, cell_idx = pointer_probs[box_idx].max(dim=0)
+        # print(f"Box {box_idx}: max_prob={max_prob:.4f}, cell_idx={cell_idx}")
+        if max_prob.item() >= confidence_threshold and cell_idx < len(token_positions):
+            token_idx = cell_idx.item()
+            if token_idx in token_positions:
+                row, col = token_positions[token_idx]
+                if row != -1:
+                    # 이미 해당 위치에 텍스트가 있는 경우 확률 비교
+                    if (row, col) in text_cells:
+                        existing_box_idx = text_cells[(row, col)]
+                        existing_prob = pointer_probs[existing_box_idx, cell_idx].item()
+                        if max_prob.item() > existing_prob:
+                            text_cells[(row, col)] = box_idx
                     else:
-                        html.append(f"{cell_tag}</td>")
-                    
-                    for r in range(i, i + rowspan):
-                        for c in range(j, j + colspan):
-                            processed.add((r, c))
+                        text_cells[(row, col)] = box_idx
+                    # print(f"Mapped to position ({row}, {col})")
+
+    # print("\nGrid Structure:")
+    # for i, row in enumerate(grid):
+    #     print(f"Row {i}: {row}")
+
+    # print("\nText Mappings:")
+    # for (row, col), box_idx in text_cells.items():
+    #     print(f"Position ({row}, {col}) -> Text: {bbox_with_text[box_idx].get('text', '')}")
+
+    # 7. HTML 테이블 생성
+    html = ["<table>"]
+    processed = set()
+    
+    for i, row in enumerate(grid):
+        html.append("<tr>")
+        for j, token in enumerate(row):
+            if (i, j) in processed:
+                continue
             
-            html.append("</tr>")
+            if token == 'C':
+                rowspan, colspan = spans[(i, j)]
+                cell_tag = "<td"
+                
+                if rowspan > 1:
+                    cell_tag += f" rowspan='{rowspan}'"
+                if colspan > 1:
+                    cell_tag += f" colspan='{colspan}'"
+                
+                cell_tag += ">"
+                
+                if (i, j) in text_cells:
+                    text_idx = text_cells[(i, j)]
+                    text = bbox_with_text[text_idx].get('text', '').strip()
+                    html.append(f"{cell_tag}{text}</td>")
+                else:
+                    html.append(f"{cell_tag}</td>")
+                
+                for r in range(i, i + rowspan):
+                    for c in range(j, j + colspan):
+                        processed.add((r, c))
         
-        html.append("</table>")
-        return '\n'.join(html)
+        html.append("</tr>")
+    
+    html.append("</table>")
+    return '\n'.join(html)
         
-    except Exception as e:
-        print(f"Error constructing pred HTML: {str(e)}")
-        return f"<table><tr><td>Error: {str(e)}</td></tr></table>"
+    # except Exception as e:
+    #     print(f"Error constructing pred HTML: {str(e)}")
+    #     return f"<table><tr><td>Error: {str(e)}</td></tr></table>"
 
 def extract_spans_from_otsl(otsl_tokens: List[int], tokenizer: OTSLTokenizer) -> Tuple[np.ndarray, np.ndarray]:
     """OTSL 토큰에서 span matrix 추출"""

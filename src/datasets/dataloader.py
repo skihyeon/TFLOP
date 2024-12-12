@@ -13,8 +13,10 @@ def collate_fn(batch, tokenizer):
     layout_prompt_length = otsl_sequence_length = tokenizer.otsl_sequence_length
     batch_size = len(batch)
     
+    image_names = [sample['image_name'] for sample in batch]
     # 1. 기본 텐서들 한번에 처리
-    images = torch.stack([sample['image'] for sample in batch])
+    # images = torch.stack([sample['image'] for sample in batch])
+    images = torch.cat([sample['image']['pixel_values'] for sample in batch], dim=0)
     num_boxes = torch.tensor([sample['num_boxes'] for sample in batch])
     
     # 2. OTSL 시퀀스 토큰화 - 벡터화 처리
@@ -60,6 +62,7 @@ def collate_fn(batch, tokenizer):
 
     
     batch_dict =  {
+        'image_names': image_names,
         'images': images,                     # (B, 3, 768, 768)
         'token_ids': token_ids_list,          # (B, 688)
         'bboxes': padded_bboxes,             # (B, 688, 4)
@@ -68,7 +71,8 @@ def collate_fn(batch, tokenizer):
         'data_tag_mask': data_tag_mask,       # (B, 1376)
         'num_boxes': num_boxes,               # (B)
         'cells': [sample['cells'] for sample in batch],
-        'html': [sample['html'] for sample in batch]
+        'html': [sample['html'] for sample in batch],
+        'bbox_with_text': [sample['bbox_with_text'] for sample in batch] # (B, N, 2)
     }
     
     return batch_dict
@@ -81,7 +85,8 @@ def create_dataloader(
     shuffle: bool = True,
     num_workers: int = 4,
     pin_memory: bool = True,
-    use_length_sampler: bool = False
+    use_length_sampler: bool = False,
+    drop_last: bool = False
 ) -> DataLoader:
     """데이터로더 생성"""
     if use_length_sampler:
@@ -89,7 +94,7 @@ def create_dataloader(
             dataset=dataset,
             batch_size=batch_size,
             shuffle=shuffle,
-            drop_last=True
+            drop_last=drop_last
         )
         return DataLoader(
             dataset,
@@ -106,5 +111,5 @@ def create_dataloader(
             num_workers=num_workers,
             collate_fn=lambda batch: collate_fn(batch, tokenizer),
             pin_memory=pin_memory,
-            drop_last=True
+            drop_last=drop_last
         )

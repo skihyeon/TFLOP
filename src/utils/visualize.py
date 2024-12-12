@@ -7,6 +7,7 @@ from typing import Optional, Dict
 from pathlib import Path
 
 def visualize_validation_sample(
+        image_name: str,
         image: torch.Tensor,
         boxes: torch.Tensor,
         pred_html: str,
@@ -182,13 +183,23 @@ def visualize_validation_sample(
     img_dir.mkdir(exist_ok=True)
     txt_dir.mkdir(exist_ok=True)
     
-    save_path = img_dir / f'val_step_{step:08d}.png'
+    cur_idx = 0
+    save_path = img_dir / f'val_epoch_{step:08d}_idx_{cur_idx:04d}.png'
+    while save_path.exists():
+        cur_idx += 1
+        save_path = img_dir / f'val_epoch_{step:08d}_idx_{cur_idx:04d}.png'
     plt.savefig(save_path, bbox_inches='tight', dpi=300, pad_inches=0.2)
     plt.close()
     
+    cur_idx = 0
     # OTSL 및 HTML 저장
-    save_txt = txt_dir / f'val_step_{step:08d}.txt'
+    save_txt = txt_dir / f'val_epoch_{step:08d}_idx_{cur_idx:04d}.txt'
+    while save_txt.exists():
+        cur_idx += 1
+        save_txt = txt_dir / f'val_epoch_{step:08d}_idx_{cur_idx:04d}.txt'
+    
     with open(save_txt, 'w') as f:
+        f.write(f"image name: {image_name}\n")
         f.write(f"Ground Truth Grid Structure:\n")
         for i, row in enumerate(true_grid):
             f.write(f"Row {i}: {' '.join(row)}\n")

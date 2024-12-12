@@ -51,27 +51,25 @@ class OTSLLengthBatchSampler(Sampler):
     
     def __iter__(self) -> Iterator[List[int]]:
         if self.shuffle:
-            # 각 버킷 내부를 섞음
             shuffled_buckets = [np.random.permutation(bucket).tolist() 
                               for bucket in self.buckets]
         else:
             shuffled_buckets = [bucket.copy() for bucket in self.buckets]
         
         batches = []
-        while True:
-            # 비어있지 않은 버킷 확인
-            valid_buckets = [b for b in shuffled_buckets if len(b) > 0]
-            
-            if not valid_buckets:
-                break
-                
-            # 현재 배치 생성
+        # 모든 버킷에서 샘플이 남아있는 동안 계속 진행
+        while any(len(bucket) > 0 for bucket in shuffled_buckets):
             current_batch = []
+            # 가능한 많은 버킷에서 샘플 수집
             for bucket in shuffled_buckets:
                 if bucket:  # 버킷에 샘플이 있으면
-                    current_batch.append(bucket.pop())  # 마지막 요소 추출
+                    current_batch.append(bucket.pop())
             
-            if len(current_batch) == self.batch_size or (not self.drop_last and current_batch):
+            # batch_size보다 작아도 마지막 배치로 추가
+            if not self.drop_last and current_batch:
+                batches.append(current_batch)
+            # batch_size와 같을 때만 추가
+            elif len(current_batch) == self.batch_size:
                 batches.append(current_batch)
         
         if self.shuffle:
@@ -80,14 +78,7 @@ class OTSLLengthBatchSampler(Sampler):
         return iter(batches)
     
     def __len__(self) -> int:
-        min_bucket_size = min(len(bucket) for bucket in self.buckets)
-        num_full_batches = min_bucket_size
-        
+        total_samples = sum(len(bucket) for bucket in self.buckets)
         if self.drop_last:
-            return num_full_batches
-        
-        remaining_samples = sum(
-            len(bucket) - num_full_batches 
-            for bucket in self.buckets
-        )
-        return num_full_batches + (remaining_samples + self.batch_size - 1) // self.batch_size
+            return total_samples // self.batch_size
+        return (total_samples + self.batch_size - 1) // self.batch_size

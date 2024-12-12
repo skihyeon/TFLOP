@@ -39,23 +39,27 @@ class TableDataModule(pl.LightningDataModule):
             )
     
     def train_dataloader(self):
-        return create_dataloader(
+        loader = create_dataloader(
             self.train_dataset,
             self.tokenizer,
             batch_size=self.train_config.batch_size,
             shuffle=True,
             num_workers=self.train_config.num_workers,
             pin_memory=self.train_config.pin_memory,
-            use_length_sampler=True  # 학습시에만 길이 기반 샘플러 사용
+            use_length_sampler=True,
+            drop_last=False
         )
+        return loader
 
     def val_dataloader(self):
-        return create_dataloader(
+        loader = create_dataloader(
             self.val_dataset,
             self.tokenizer,
             batch_size=self.train_config.batch_size,
             shuffle=False,
             num_workers=self.train_config.num_workers,
             pin_memory=self.train_config.pin_memory,
-            use_length_sampler=False  # 검증시에는 일반 배치 샘플러 사용
+            use_length_sampler=False,
+            drop_last=False
         )
+        return loader

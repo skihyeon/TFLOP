@@ -10,11 +10,13 @@ from typing import Dict, Optional, Any
 import jsonlines
 from utils.util import extract_spans_from_html, convert_html_to_otsl, extract_spans_from_otsl, compute_span_coefficients
 import numpy as np
+from transformers import AutoImageProcessor
+from config import ModelConfig
 
 # 디버그 모드 설정
 DEBUG = True
 DEBUG_SAMPLES = {
-    'train': 200000,
+    'train': 10000,
     'val': 100
 }
 
@@ -51,6 +53,8 @@ class TableDataset(Dataset):
                 std=[0.229, 0.224, 0.225]
             )
         ])
+        self.image_processor = AutoImageProcessor.from_pretrained(ModelConfig.swin_model_name)
+        self.image_processor.size = (image_size, image_size)
         
         # 주석 파일 로드 및 필터링
         self._load_and_filter_annotations()
@@ -73,14 +77,19 @@ class TableDataset(Dataset):
                     if otsl_tokens_list is None:
                         filtered_count += 1
                         continue
-                    ## for debug
+                    # for debug
                     # if len(otsl_tokens_list) > 30:
                     #     filtered_count += 1
                     #     continue
-                    # if 'U' not in otsl_tokens_list:
+                    # if self.split == 'train' and ('U' not in otsl_tokens_list or 'X' not in otsl_tokens_list or 'L' not in otsl_tokens_list):
                     #     filtered_count += 1
                     #     continue
-                    ## 
+                    if self.split == 'train' and len(otsl_tokens_list) > 30 and ('U' in otsl_tokens_list or 'X' in otsl_tokens_list or 'L' in otsl_tokens_list):
+                        filtered_count += 1
+                        continue
+                    if self.split == 'val' and len(otsl_tokens_list) > 30 and ('U' in otsl_tokens_list or 'X' in otsl_tokens_list or 'L' in otsl_tokens_list):
+                        filtered_count += 1
+                        continue
                     
                     # 길이 검증
                     num_boxes = len(ann['html']['cells'])
@@ -123,7 +132,8 @@ class TableDataset(Dataset):
             raise ValueError(f"Failed to load image {image_path}: {str(e)}")
         
         image_width, image_height = image.size
-        image = self.transform(image)
+        # image = self.transform(image)
+        image = self.image_processor(image, return_tensors="pt")
         
         # 1. C 태그의 sequence 내 실제 위치 추적
         token_positions = []  # C 태그의 sequence 내 위치 저장
@@ -174,6 +184,20 @@ class TableDataset(Dataset):
         # print(f"Token positions: {token_positions}")
         # for i, mappings in enumerate(current_mappings):
             # print(f"Box {i} mapped to sequence positions: {mappings}")
+                
+        bbox_with_text = {}
+        for i, cell in enumerate(ann['html']['cells']):
+            tokens = cell.get('tokens', [])  # tokens가 없을 경우 빈 리스트 반환
+            bbox = cell.get('bbox')          # bbox가 없을 수 있음
+            
+            if 'tokens' in cell:  # tokens 키가 존재하면 (빈 리스트여도) 처리
+                text = self.tokens_to_text(tokens) if tokens else ""
+                bbox_with_text[i] = {
+                    'bbox': bbox,  # bbox가 None일 수 있음
+                    'text': text
+                }
+                    
+        
             
         return {
             'image_name': image_name,
@@ -185,7 +209,8 @@ class TableDataset(Dataset):
             'html': ann['html'],
             'has_data_flags_list': has_data,           # (S)
             'box_mappings': current_mappings,          # (N, max_mappings)
-            'token_positions': token_positions  # sequence 내 C 태그 위치 정보 추가
+            'token_positions': token_positions,        # sequence 내 C 태그 위치 정보 추가
+            'bbox_with_text': bbox_with_text
         }
 
     def bbox_belongs_to_cell(self, bbox1, bbox2):
@@ -199,6 +224,14 @@ class TableDataset(Dataset):
         
         return (cx1 <= center_x <= cx2 and 
                 cy1 <= center_y <= cy2)
+    
+    def tokens_to_text(self, tokens):
+        # HTML 태그 제거 (<b>, </b> 등)
+        text_tokens = [token for token in tokens if not (token.startswith('<') and token.endswith('>'))]
+        # 토큰들을 하나의 문자열로 합치기
+        text = ''.join(text_tokens)
+        return text
+
 
     def __len__(self) -> int:
         return len(self.image_names)

@@ -44,7 +44,7 @@ def main():
             every_n_epochs=1,  # 매 epoch마다 저장
             save_on_train_epoch_end=True,
             save_last=True,  # 마지막 체크포인트는 따로 저장
-            save_weights_only=True  # 모델 가중치만 저장
+            # save_weights_only=True  # 모델 가중치만 저장
         ),
         ValidationVisualizationCallback(viz_dir=exp_dir / "visualizations")
     ]
@@ -95,7 +95,7 @@ def main():
         precision=train_config.precision,
         accumulate_grad_batches=train_config.accumulate_grad_batches,
         gradient_clip_val=train_config.gradient_clip_val,
-        check_val_every_n_epoch=1,  # 매 epoch마다 validation 수행
+        check_val_every_n_epoch=train_config.check_val_every_n_epoch,  # 매 epoch마다 validation 수행
         num_sanity_val_steps=train_config.num_sanity_val_steps,
         logger=logger,
         callbacks=callbacks,
@@ -106,18 +106,20 @@ def main():
 
     if train_config.resume_training and train_config.resume_checkpoint_path:
         print(f"Resuming training from checkpoint: {train_config.resume_checkpoint_path}")
-        trainer.fit(
-            model, 
-            datamodule=datamodule,
-            ckpt_path=train_config.resume_checkpoint_path
-        )
+        # optimizer 상태를 제외하고 모델 가중치만 로드
+        state_dict = torch.load(train_config.resume_checkpoint_path)
+        model.load_state_dict(state_dict['state_dict'])
+        trainer.fit(model, datamodule=datamodule, ckpt_path=train_config.resume_checkpoint_path)
+        # trainer.fit(model, datamodule=datamodule)
     else:
         trainer.fit(model, datamodule=datamodule)
 
 
 if __name__ == '__main__':
     from setproctitle import setproctitle
-    setproctitle("TFLOP")
+    from datetime import datetime
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    setproctitle(f"TFLOP_{timestamp}")
     pl.seed_everything(42)
     torch.set_float32_matmul_precision('high')
     main()
