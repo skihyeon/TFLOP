@@ -113,11 +113,13 @@ class TFLOPLightningModule(pl.LightningModule):
                     self.log("val/teds", teds, 
                             on_epoch=True, 
                             prog_bar=True, 
-                            batch_size=batch_size)
+                            batch_size=batch_size,
+                            sync_dist=True)
                     self.log("val/teds_struct", teds_struct, 
                             on_epoch=True, 
                             prog_bar=True, 
-                            batch_size=batch_size)
+                            batch_size=batch_size,
+                            sync_dist=True)
                     
                 except Exception as e:
                     teds = 0.0

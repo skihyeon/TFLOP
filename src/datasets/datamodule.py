@@ -39,27 +39,23 @@ class TableDataModule(pl.LightningDataModule):
             )
     
     def train_dataloader(self):
-        loader = create_dataloader(
+        return DataLoader(
             self.train_dataset,
-            self.tokenizer,
             batch_size=self.train_config.batch_size,
-            shuffle=True,
+            shuffle=False,  # DistributedSampler에서 처리함
             num_workers=self.train_config.num_workers,
             pin_memory=self.train_config.pin_memory,
-            use_length_sampler=True,
+            collate_fn=lambda batch: collate_fn(batch, self.tokenizer),
             drop_last=False
         )
-        return loader
 
     def val_dataloader(self):
-        loader = create_dataloader(
+        return DataLoader(
             self.val_dataset,
-            self.tokenizer,
             batch_size=self.train_config.batch_size,
             shuffle=False,
             num_workers=self.train_config.num_workers,
             pin_memory=self.train_config.pin_memory,
-            use_length_sampler=False,
+            collate_fn=lambda batch: collate_fn(batch, self.tokenizer),
             drop_last=False
         )
-        return loader

@@ -58,28 +58,29 @@ class TrainingConfig:
     num_epochs: int = 200
     checkpoint_dir: str = "./checkpoints"
     
-    batch_size: int = 2
-    accumulate_grad_batches: int = 32
+    batch_size: int = 2 
+    accumulate_grad_batches: int = 16
     learning_rate: float = 1e-3
     
     # Device & Hardware
-
+    gpu_id: int = 1  # 기본 GPU ID (단일 GPU 사용시)
+    devices: list = None  # 이 부분을 수정
+    accelerator: str = "gpu"
+    strategy: str = "ddp"  # multi-GPU 사용시 "ddp"로 설정
+    
     num_workers: int = 12
     pin_memory: bool = True
     
     # Trainer 설정
-    accelerator: str = "gpu"
-    devices: list = None
-    strategy: str = "auto"
     precision: str = "32"
     gradient_clip_val: float = 0.5
     num_sanity_val_steps: int = 2
     check_val_every_n_epoch: int = 1
     
     def __post_init__(self):
-        # devices 설정
+        # devices 설정 수정
         if self.devices is None:
-            self.devices = [self.gpu_id] if torch.cuda.is_available() else None
+            self.devices = [0, 1]  # 0번과 1번 GPU만 사용하도록 설정
         
         # accelerator 설정
         if not torch.cuda.is_available():
