@@ -28,17 +28,17 @@ class OTSLLengthBatchSampler(Sampler):
             for idx in range(len(dataset))
         ])
         
-        # 버킷 경계 계산 (균등 분할)
-        self.boundaries = np.percentile(
-            self.lengths, 
-            np.linspace(0, 100, self.num_buckets + 1)
-        )
+        # 길이로 정렬된 인덱스 얻기
+        sorted_indices = np.argsort(self.lengths)
         
-        # 인덱스를 버킷에 할당
+        # 샘플 수 기준으로 균등하게 나누기
+        samples_per_bucket = len(dataset) // self.num_buckets
         self.buckets = [[] for _ in range(self.num_buckets)]
-        for idx, length in enumerate(self.lengths):
-            bucket_idx = np.searchsorted(self.boundaries[1:], length)
-            self.buckets[min(bucket_idx, self.num_buckets-1)].append(idx)
+        
+        for bucket_idx in range(self.num_buckets):
+            start_idx = bucket_idx * samples_per_bucket
+            end_idx = start_idx + samples_per_bucket if bucket_idx < self.num_buckets - 1 else len(sorted_indices)
+            self.buckets[bucket_idx] = sorted_indices[start_idx:end_idx].tolist()
         
         # 버킷 통계 출력
         print("\nBucket Statistics:")

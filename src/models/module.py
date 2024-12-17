@@ -7,6 +7,9 @@ from metrics.teds import compute_teds, compute_teds_struct
 from utils.util import construct_table_html_pred, construct_table_html_gt
 import torchmetrics
 import math
+import matplotlib.pyplot as plt
+from pathlib import Path
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 class TFLOPLightningModule(pl.LightningModule):
     def __init__(self, model_config: Any, train_config: Any, inference_mode: bool = False):
@@ -40,19 +43,13 @@ class TFLOPLightningModule(pl.LightningModule):
         loss_dict = self.criterion(batch, outputs)
         # Loss logging (step과 epoch 단위로 분리)
         for name, value in loss_dict.items():
-            # Step 단위 로깅
-            self.log(f"train/{name}_step", value,
-                    batch_size=batch['images'].size(0),
-                    on_step=True,
-                    on_epoch=False,
-                    prog_bar=False)
-            
             # Epoch 단위 로깅
-            self.log(f"train/{name}_epoch", value,
+            self.log(f"train/{name.replace('_loss', '')}", value,
                     batch_size=batch['images'].size(0),
                     on_step=False,
                     on_epoch=True,
                     prog_bar=True)
+        
         
         return loss_dict
         
@@ -77,6 +74,7 @@ class TFLOPLightningModule(pl.LightningModule):
         
         # 첫 번째 배치의 첫 번째 샘플에 대해서만 처리
         try:
+            # 배치의 첫 번째 샘플에 대해서만 처리
             for i in range(batch_size):
                 # 예측 토큰과 실제 토큰 디코딩
                 pred_tokens = outputs['tag_logits'][i].argmax(dim=-1)
@@ -106,7 +104,9 @@ class TFLOPLightningModule(pl.LightningModule):
                     # TEDS 계산
                     teds = compute_teds(pred_html, true_html)
                     teds_struct = compute_teds_struct(pred_html, true_html)
-                    
+                    print(f"pred_otsl: {pred_otsl}")
+                    print(f"true_otsl: {true_otsl}")
+                    print(f"teds: {teds}, teds_struct: {teds_struct}")
                     self.val_teds.update(teds)
                     self.val_teds_struct.update(teds_struct)
                     
@@ -138,7 +138,7 @@ class TFLOPLightningModule(pl.LightningModule):
                     'teds_s': teds_struct,
                     'log_text': log_text
                 }
-            
+        
         except Exception as e:
             print(f"검증 단계 처리 중 오류 발생: {str(e)}")
             self.val_teds.update(0.0)
@@ -173,16 +173,21 @@ class TFLOPLightningModule(pl.LightningModule):
             weight_decay=0.01
         )
         
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        scheduler = ReduceLROnPlateau(
             optimizer,
-            T_max=self.train_config.num_epochs,  # total_steps 대신 num_epochs 사용
-            eta_min=1e-6
+            mode='min',
+            factor=0.5,  # lr을 절반으로 감소
+            patience=5,   # 5 에폭동안 개선이 없으면 lr 감소
+            verbose=True,
+            min_lr=1e-6  # 최소 lr
         )
         
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "interval": "epoch"  # step 대신 epoch 단위 변경
+                "monitor": "val/loss",  # validation loss 기준
+                "interval": "epoch",    # epoch 단위로 업데이트
+                "frequency": 1
             }
         }

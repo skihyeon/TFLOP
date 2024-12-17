@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict
 from .otsl_tokenizer import OTSLTokenizer
+from config import ModelConfig
 
 class TFLOPLoss(nn.Module):
     """
@@ -23,6 +24,7 @@ class TFLOPLoss(nn.Module):
         super().__init__()
         if tokenizer is None:
             raise ValueError("Tokenizer must be provided")
+        self.config = ModelConfig()
         self.tokenizer = tokenizer
         self.lambda_cls = lambda_cls
         self.lambda_ptr = lambda_ptr
@@ -32,151 +34,162 @@ class TFLOPLoss(nn.Module):
         self.temperature = temperature
         
         # length 지정
-        self.layout_prompt_length = self.otsl_sequence_length = tokenizer.otsl_sequence_length
+        self.layout_prompt_length = self.config.total_sequence_length - self.config.otsl_max_length
         
-    def compute_pointer_loss(self, pointer_logits, box_indices, data_tag_mask):
-        """
-        Args:
-            pointer_logits: (B, :688, 688:) 
-            box_indices: (B, N, M)
-            data_tag_mask: (B, 1376) C태그이면서 has_data=True인 위치만 True
-        """
-        batch_size = pointer_logits.size(0)
-        device = pointer_logits.device
+        
+    def compute_pointer_loss(self, pointer_logits: torch.Tensor, 
+                            box_indices: torch.Tensor, 
+                            data_tag_mask: torch.Tensor,
+                            temperature: float = 0.1) -> torch.Tensor:
+        """Layout pointer loss for non-empty cells (Equation 2)"""
+        B, num_boxes, seq_len = pointer_logits.shape
         
         # Temperature scaling
-        scaled_logits = pointer_logits  # (B, 688, 688) # 이미 스케일링 되어있음
+        pointer_logits = pointer_logits / temperature
         
-        # data_tag_mask 준비 (B, 688)
-        sequence_mask = data_tag_mask[:, self.layout_prompt_length:]
+        # 1. Get target positions for each box
+        valid_boxes = box_indices != -1  # (B, num_boxes, max_mappings)
+        valid_box_mask = valid_boxes.any(dim=-1)  # (B, num_boxes)
         
-        # 수치 안정성을 위한 max normalization
-        max_logits = torch.max(scaled_logits, dim=-1, keepdim=True)[0]
-        scaled_logits = scaled_logits - max_logits
+        # 2. Get valid C tag positions (OTSL sequence 내에서의 상대적 위치 사용)
+        valid_tag_positions = data_tag_mask[:, self.layout_prompt_length:]  # (B, 30)
         
-        # exp(logits) 계산 (B, 688, 688)
-        exp_logits = torch.exp(scaled_logits)
+        # 3. Compute loss for each valid box
+        box_losses = torch.zeros_like(valid_box_mask, dtype=torch.float, device=pointer_logits.device)
         
-        # 분모 계산: masked sum (B, 688, 1)
-        denominator = torch.sum(
-            exp_logits * sequence_mask.unsqueeze(1),
-            dim=-1,
-            keepdim=True
-        ) + 1e-10
+        # print("\n[Pointer Loss Debug]")
+        for b in range(B):
+            for j in range(num_boxes):
+                if valid_box_mask[b, j]:
+                    # Get all target positions for this box (k*)
+                    target_positions = box_indices[b, j][valid_boxes[b, j]]  # 여러 target positions
+                    
+                    # Compute log probabilities over valid positions only
+                    log_probs = F.log_softmax(pointer_logits[b, j], dim=-1)
+                    
+                    # Average log probs across all target positions
+                    box_losses[b, j] = -log_probs[target_positions].mean()
+                    
+                    # print(f"Batch {b}, Box {j}:")
+                    # print(f"  Target positions: {target_positions.tolist()}")
+                    # print(f"  Valid positions: {valid_tag_positions[b].nonzero().squeeze(-1).tolist()}")
+                    # print(f"  Loss: {box_losses[b, j].item():.4f}")
         
-        # Valid한 box indices에 대한 마스크 생성 (B, 688)
-        valid_box_mask = (box_indices != -1).any(dim=-1)
+        # 4. Average over valid boxes (excluding inf losses)
+        valid_losses = box_losses[valid_box_mask & ~torch.isinf(box_losses)]
+        final_loss = valid_losses.mean() if len(valid_losses) > 0 else torch.tensor(0.0, device=pointer_logits.device)
         
-        # Loss 계산을 위한 target 마스크 준비
-        target_mask = torch.zeros_like(exp_logits, dtype=torch.bool)
-        for b in range(batch_size):
-            for box_idx in range(self.layout_prompt_length):
-                if valid_box_mask[b, box_idx]:
-                    valid_targets = box_indices[b, box_idx][box_indices[b, box_idx] != -1]
-                    target_mask[b, box_idx, valid_targets] = True
+        # print(f"\nValid losses: {len(valid_losses)}/{valid_box_mask.sum().item()}")
+        # print(f"Final pointer loss: {final_loss.item():.4f}")
         
-        # Masked loss 계산
-        valid_probs = exp_logits / denominator
-        losses = -torch.log(valid_probs + 1e-10)
-        masked_losses = losses * (target_mask & sequence_mask.unsqueeze(1))
-        
-        # 유효한 샘플 수 계산
-        valid_count = (masked_losses != 0).sum()
-        
-        if valid_count == 0:
-            return torch.tensor(0.0, device=device)
-        
-        total_loss = masked_losses.sum()
-        
-        return total_loss / valid_count
+        return final_loss
 
-
-    def compute_empty_pointer_loss(self, empty_pointer_logits, data_tag_mask, attention_mask):
-        """
+    def compute_empty_pointer_loss(self, empty_logits: torch.Tensor,
+                             data_tag_mask: torch.Tensor,
+                             empty_tag_mask: torch.Tensor) -> torch.Tensor:
+        """Empty pointer loss (Equation 3)
+        
         Args:
-            empty_pointer_logits: (B, 1, 688:)
-            data_tag_mask: (B, 1376)
-            attention_mask: (B, 1376)
+            empty_logits: (B, 1, 30) - raw logits
+            data_tag_mask: (B, 1024) - non-empty C 태그 위치
+            empty_tag_mask: (B, 1024) - empty C 태그 위치
         """
-        device = empty_pointer_logits.device
+        # Ensure correct shape
+        if empty_logits.dim() == 3:
+            empty_logits = empty_logits.squeeze(1)  # (B, 30)
         
-        # 마스크 준비 (B, 688)
-        sequence_mask = attention_mask[:, self.layout_prompt_length:]
-        data_mask = data_tag_mask[:, self.layout_prompt_length:]
+        # 1. OTSL sequence 부분만 선택
+        otsl_mask = (data_tag_mask | empty_tag_mask)[:, self.layout_prompt_length:]  # (B, 30) - 모든 C 태그
+        targets = empty_tag_mask[:, self.layout_prompt_length:]  # (B, 30) - empty C 태그
         
-        # Target 계산 (B, 688)
-        targets = sequence_mask & ~data_mask
-        
-        # Masked BCE loss
-        logits = empty_pointer_logits.squeeze(1)  # (B, 688)
-        valid_mask = sequence_mask
-        
-        loss = F.binary_cross_entropy_with_logits(
-            logits[valid_mask],
-            targets[valid_mask].float(),
-            reduction='mean'
+        # 2. Compute BCE loss
+        bce_loss = F.binary_cross_entropy_with_logits(
+            empty_logits,  # (B, 30)
+            targets.float(),  # (B, 30)
+            reduction='none'  # (B, 30)
         )
         
-        return loss
-
-    def compute_span_aware_contrastive_loss(
-        self,
-        sim_matrix: torch.Tensor,
-        span_coef_matrix: torch.Tensor,
-    ) -> torch.Tensor:
-        device = sim_matrix.device
-        span_coef_matrix = span_coef_matrix.to(device)
-        # Mask out invalid positions (where span_coef == -1)
-        valid_mask = (span_coef_matrix >= 0)
-        pos_mask = (span_coef_matrix > 0)
+        # 3. Apply mask and compute mean
+        masked_loss = bce_loss * otsl_mask  # only consider C tag positions
+        num_c_tags = otsl_mask.sum(dim=1, keepdim=True) + 1e-8
+        batch_losses = masked_loss.sum(dim=1) / num_c_tags.squeeze()
         
-        # Temperature scaling
-        sim_matrix = sim_matrix / self.temperature
+        # Debug information
+        # print("\n[Empty Pointer Loss Debug]")
+        # print(f"Total samples: {len(batch_losses)}")
+        # for b in range(len(batch_losses)):
+            # n_total = otsl_mask[b].sum().item()
+            # n_empty = targets[b].sum().item()
+            # print(f"\nBatch {b}:")
+            # print(f"  Total C tags: {n_total}")
+            # print(f"  Empty C tags: {n_empty}")
+            # print(f"  Empty ratio: {n_empty/n_total:.2f}")
+            # print(f"  Loss: {batch_losses[b].item():.4f}")
+            
+            # Show predictions vs targets
+            # probs = torch.sigmoid(empty_logits[b])
+            # mask = otsl_mask[b]
+            # print("\n  C tag positions (prob -> target):")
+            # for pos in mask.nonzero().squeeze(-1):
+                # print(f"    Pos {pos}: {probs[pos]:.3f} -> {targets[b, pos].item()}")
         
-        # Numerical stability
-        sim_matrix_max, _ = torch.max(sim_matrix * valid_mask - 1e8 * (~valid_mask), dim=-1, keepdim=True)
-        sim_matrix = sim_matrix - sim_matrix_max.detach()
-        
-        # exp(sim) with masking
-        exp_sim = torch.exp(sim_matrix) * valid_mask  # zero out invalid positions
-        
-        # Denominator calculation (exclude self connections)
-        diag_mask = ~torch.eye(exp_sim.size(1), device=device, dtype=torch.bool).unsqueeze(0)
-        denominator = torch.sum(exp_sim * diag_mask, dim=-1, keepdim=True) + 1e-8
-        
-        # Log probability calculation
-        log_probs = sim_matrix - torch.log(denominator)
-        
-        # Mask out invalid positions in final loss
-        weighted_loss = -(span_coef_matrix * log_probs * pos_mask)
-        
-        # Normalize by positive coefficients
-        norm_factor = torch.sum(span_coef_matrix * pos_mask, dim=-1) + 1e-8
-        row_losses = torch.sum(weighted_loss, dim=-1) / norm_factor
-        
-        # Only consider valid rows
-        valid_rows = (norm_factor > 1e-8)
-        final_losses = row_losses * valid_rows
+        final_loss = batch_losses.mean()
+        # print(f"\nFinal loss: {final_loss.item():.4f}")
+        return final_loss
     
-        valid_count = valid_rows.sum()
-        if valid_count == 0:
-            return torch.tensor(0.0, device=device)
-        
-        return final_losses.sum() / valid_count   
-        
+    def compute_span_aware_contrastive_loss(
+            self,
+            sim_matrix: torch.Tensor,  # (B, N, N)
+            span_coef_matrix: torch.Tensor,  # (B, N, N)
+        ) -> torch.Tensor:
+            device = sim_matrix.device
+            span_coef_matrix = span_coef_matrix.to(device)
+            
+            # Temperature scaling
+            sim_matrix = sim_matrix / self.temperature  # (B, N, N)
+            
+            # 1. Compute exp(sim_matrix/τ) for all pairs
+            exp_sim = torch.exp(sim_matrix)  # (B, N, N)
+            
+            # 2. Compute denominator (sum over all pairs)
+            denominator = exp_sim.sum(dim=-1, keepdim=True)  # (B, N, 1)
+            
+            # 3. Compute log probabilities
+            log_probs = torch.log(exp_sim / denominator + 1e-8)  # (B, N, N)
+            
+            # 4. Mask for valid pairs (coef >= 0)
+            valid_mask = (span_coef_matrix >= 0)  # (B, N, N)
+            
+            # 5. Compute weighted sum of log probs for valid pairs
+            weighted_log_probs = span_coef_matrix * log_probs * valid_mask
+            
+            # 6. Normalize by sum of coefficients and compute mean
+            coef_sum = span_coef_matrix.sum(dim=-1) + 1e-8  # (B, N)
+            box_losses = -(weighted_log_probs.sum(dim=-1) / coef_sum)  # (B, N)
+            
+            # 7. Mask out invalid boxes (no positive pairs)
+            valid_boxes = valid_mask.any(dim=-1)  # (B, N)
+            final_loss = (box_losses * valid_boxes).sum() / (valid_boxes.sum() + 1e-8)
+            
+            return final_loss
+            
     def compute_tag_loss(self, tag_logits, tag_targets):
-        B, S, C = tag_logits.shape
-        tag_logits = tag_logits.contiguous().view(-1, C)
-        tag_targets = tag_targets.contiguous().view(-1)
-        
-        # PAD 토큰 포함하여 loss 계산
-        cls_loss = F.cross_entropy(
-            tag_logits,
-            tag_targets,
-            reduction='mean',
+        """
+        Args:
+            tag_logits: (B, S, V)
+            tag_targets: (B, V)
+        """
+        # print(f"tag_logits shape: {tag_logits.shape}")
+        # print(f"tag_targets shape: {tag_targets.shape}")
+        # print(f"tag_logits stats: min={tag_logits.min():.3f}, max={tag_logits.max():.3f}")
+        # print(f"unique targets: {torch.unique(tag_targets).tolist()}")
+    
+        return F.cross_entropy(
+            tag_logits.reshape(-1, self.tokenizer.vocab_size),  # (B*S, V)
+            tag_targets.reshape(-1),  # (B*S)
+            ignore_index=self.tokenizer.pad_token_id,
+            label_smoothing=0.1
         )
-        return cls_loss
-
 
     def forward(self, batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
 
@@ -206,23 +219,16 @@ class TFLOPLoss(nn.Module):
             pointer_logits=pointer_logits,
             box_indices=box_indices,
             data_tag_mask=data_tag_mask,
+            temperature=self.temperature,
         )
 
         # 3. Empty Pointer Loss (Equation 3)
         empty_ptr_loss = self.compute_empty_pointer_loss(
-            empty_pointer_logits=empty_pointer_logits,
-            data_tag_mask=data_tag_mask,
-            attention_mask=attention_mask,
+            empty_logits=empty_pointer_logits,
+            data_tag_mask=batch['data_tag_mask'],
+            empty_tag_mask=batch['empty_tag_mask']
         )
         
-        return {
-            'loss': cls_loss + ptr_loss + empty_ptr_loss,
-            'cls_loss': cls_loss,
-            'ptr_loss': ptr_loss,
-            'empty_ptr_loss': empty_ptr_loss,
-            'row_contr_loss': torch.tensor(0.0, device=tag_logits.device),
-            'col_contr_loss': torch.tensor(0.0, device=tag_logits.device)
-        }
         # 4. Span-aware Contrastive Loss (Equation 5)
         row_contr_loss = torch.tensor(0.0, device=tag_logits.device)
         col_contr_loss = torch.tensor(0.0, device=tag_logits.device)
@@ -255,5 +261,8 @@ class TFLOPLoss(nn.Module):
             'row_contr_loss': row_contr_loss,
             'col_contr_loss': col_contr_loss
         }
+        
+        # for key, value in loss_dict.items():
+            # print(f"{key}: {value}")
         
         return loss_dict

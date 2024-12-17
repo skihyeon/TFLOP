@@ -11,6 +11,7 @@ from torch.utils.data import Dataset, DataLoader
 
 from models.tflop import TFLOP
 from models.otsl_tokenizer import OTSLTokenizer
+from config import InferenceConfig
 
 class InferenceDataset(Dataset):
     """Inference용 데이터셋"""
@@ -23,6 +24,8 @@ class InferenceDataset(Dataset):
         self.image_paths = image_paths
         self.image_processor = image_processor
         self.ocr_results = ocr_results or {}
+        self.config = InferenceConfig()
+        self.layout_prompt_length = self.config.total_sequence_length - self.config.otsl_max_length
 
     def __len__(self) -> int:
         return len(self.image_paths)
@@ -37,10 +40,23 @@ class InferenceDataset(Dataset):
         # OCR 결과 처리
         image_ocr = self.ocr_results.get(str(image_path), [])
         
+        # Data tag mask 생성
+        total_length = self.config.total_sequence_length
+        data_tag_mask = torch.zeros(total_length, dtype=torch.bool)
+        
+        # OCR 결과가 있는 경우에만 data tag mask 설정
+        if image_ocr:
+            # layout prompt 부분은 False로 유지
+            # OCR 텍스트가 있는 위치만 True로 설정
+            for i, ocr in enumerate(image_ocr):
+                if 'text' in ocr and ocr['text'].strip():  # 텍스트가 있는 경우
+                    data_tag_mask[self.layout_prompt_length + i] = True
+        
         return {
             'image_path': image_path,
             'image': processed_image,
-            'ocr_results': image_ocr
+            'ocr_results': image_ocr,
+            'data_tag_mask': data_tag_mask
         }
 
 def inference_collate_fn(batch: List[Dict]) -> Dict[str, Any]:
@@ -48,7 +64,8 @@ def inference_collate_fn(batch: List[Dict]) -> Dict[str, Any]:
     return {
         'image_paths': [item['image_path'] for item in batch],
         'images': torch.cat([item['image']['pixel_values'] for item in batch], dim=0),
-        'ocr_results': [item['ocr_results'] for item in batch]
+        'ocr_results': [item['ocr_results'] for item in batch],
+        'data_tag_mask': torch.stack([item['data_tag_mask'] for item in batch])
     }
 
 def create_inference_dataloader(
@@ -90,14 +107,14 @@ class TFLOPInferenceLightningModule(pl.LightningModule):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.save_hyperparameters()
+        # self.save_hyperparameters()
         
         # TFLOP 모델 초기화
         self.model = TFLOP(config, inference_mode=True)
         
         # 토크나이저 초기화
         self.tokenizer = OTSLTokenizer(
-            otsl_sequence_length=config.total_sequence_length // 2
+            otsl_sequence_length=config.otsl_max_length
         )
         
         # 이미지 전처리기 초기화
@@ -116,12 +133,13 @@ class TFLOPInferenceLightningModule(pl.LightningModule):
         """배치 단위 추론"""
         images = batch['images']
         ocr_results = batch['ocr_results']
+        data_tag_mask = batch['data_tag_mask']
         batch_size = len(images)
 
         # OCR 결과 처리
         padded_bboxes = torch.zeros(
             batch_size, 
-            self.config.total_sequence_length // 2, 
+            self.config.otsl_max_length, 
             4, 
             device=self.device
         )
@@ -139,21 +157,17 @@ class TFLOPInferenceLightningModule(pl.LightningModule):
                 bbox_with_text = {}
             bbox_with_text_list.append(bbox_with_text)
 
-        attention_mask = torch.zeros(batch_size, self.config.total_sequence_length, dtype=torch.bool).to(self.device)
-        attention_mask[:, :self.config.total_sequence_length//2 ] = True  # layout prompt 부분만 True로 설정
-        
         # 모델 추론
         outputs = self.model({
             'images': images,
             'bboxes': padded_bboxes,
-            'attention_mask': attention_mask
+            'data_tag_mask': data_tag_mask.to(self.device)
         })
 
         # 결과 처리
         results = []
         for i in range(batch_size):
-            # pred_tokens = outputs['tag_logits'][i].argmax(dim=-1)
-            pred_tokens = outputs['generated_ids'][i]
+            pred_tokens = outputs['tag_logits'][i].argmax(dim=-1)
             
             pred_otsl = self.tokenizer.decode(pred_tokens.cpu().tolist())
             print(f"Decoded OTSL: {pred_otsl}")

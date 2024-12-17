@@ -6,28 +6,25 @@ from pathlib import Path
 @dataclass
 class ModelConfig:
     """TFLOP 모델 설정"""
-    feature_dim: int = 688      # 모델의 hidden dimension 크기
-    total_sequence_length: int = 688  # 최대 시퀀스(토큰) 길이
-    image_size: int = 376       # 입력 이미지의 크기 (height=width)  # 논문 768
+    # feature_dim: int = 768      # 모델의 hidden dimension 크기       # 논문 1024
+    # total_sequence_length: int = 512  # 최대 시퀀스(토큰) 길이        # 논문 1376 # bart position embedding최대 길이 1024
+    # otsl_max_length: int = 30
+    # image_size: int = 224  
+    # swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
+    
+    
+    feature_dim: int = 768      # 모델의 hidden dimension 크기       # 논문 1024
+    total_sequence_length: int = 1024  # 최대 시퀀스(토큰) 길이        # 논문 1376 # bart position embedding최대 길이 1024
+    otsl_max_length: int = 30
+    image_size: int = 672    
+    swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
+    
+    
+    
     temperature: float = 0.1    # Layout Pointer의 softmax temperature
     
-    # Swin Transformer 설정
-    # swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
-    swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
-    # swin_model_name: str = "microsoft/swinv2-tiny-patch4-window16-256"
-    
-    # BART model 설정
-    # encoder_layers: int = 6
-    encoder_layers: int = 4
-    # decoder_layers: int = 6
-    decoder_layers: int = 4
-    # encoder_attention_heads: int = 8
-    encoder_attention_heads: int = 4
-    # decoder_attention_heads: int = 8
-    decoder_attention_heads: int = 4
     dropout: float = 0.1
 
-    
     # Loss weights (논문 Section 3.7)
     lambda_cls: float = 1.0
     lambda_ptr: float = 1.0
@@ -35,7 +32,6 @@ class ModelConfig:
     lambda_row_contr: float = 0.5
     lambda_col_contr: float = 0.5
 
-    scale_embedding: bool = True
     def to_dict(self):
         """설정을 딕셔너리로 변환"""
         return {k: str(v) if isinstance(v, Path) else v 
@@ -46,10 +42,12 @@ class TrainingConfig:
     """학습 설정"""
     exp_name: str = "TFLOP"
     use_wandb: bool = False
+    gpu_id: int = 2
     
     # Resume training
     resume_training: bool = False
-    resume_checkpoint_path: Optional[str] = None  # 재개할 체크포인트 경로
+    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241216_1450_TFLOP_tiny_224_len30_deep_layoutEncoder/checkpoints/TFLOP_tiny_672_len30_deep_layoutEncoder_epoch=20.ckpt"
+    # resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241211_1551_TFLOP_tiny/checkpoints/TFLOP_epoch=130.ckpt"
     
     # Data
     data_dir: str = "./data/pubtabnet"
@@ -57,19 +55,15 @@ class TrainingConfig:
     val_split: str = "val"
     
     # Training
-    total_steps: int = 100000
-    eval_steps: int = 200
-    save_steps: int = 2000
+    num_epochs: int = 200
     checkpoint_dir: str = "./checkpoints"
     
-    batch_size: int = 4
-    gradient_accumulation_steps: int = 8
+    batch_size: int = 2
+    accumulate_grad_batches: int = 32
     learning_rate: float = 1e-3
-    warmup_steps: int = 0
-    max_grad_norm: float = 0.5
     
     # Device & Hardware
-    gpu_id: int = 0
+
     num_workers: int = 12
     pin_memory: bool = True
     
@@ -78,9 +72,9 @@ class TrainingConfig:
     devices: list = None
     strategy: str = "auto"
     precision: str = "32"
-    accumulate_grad_batches: int = 8
     gradient_clip_val: float = 0.5
     num_sanity_val_steps: int = 2
+    check_val_every_n_epoch: int = 1
     
     def __post_init__(self):
         # devices 설정
@@ -95,9 +89,6 @@ class TrainingConfig:
         # device 설정
         self.device = torch.device(f'cuda:{self.gpu_id}' if torch.cuda.is_available() else 'cpu')
     
-    # Logging
-    log_every_n_steps: int = 10
-    
     def to_dict(self):
         return {k: str(v) if isinstance(v, Path) else v 
                 for k, v in self.__dict__.items()}
@@ -107,14 +98,18 @@ class InferenceConfig:
     """추론 관련 설정"""
     
     # 모델 관련
-    checkpoint_path: str = 'checkpoints/best_model.pt'
+    checkpoint_path: str = '/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241216_1450_TFLOP_tiny_224_len30_deep_layoutEncoder/checkpoints/TFLOP_tiny_224_len30_deep_layoutEncoder_epoch=44.ckpt'
     device: str = 'cuda'
     
-    # 데이터 관련
-    batch_size: int = 16
-    num_workers: int = 4
+    feature_dim: int = 768      # 모델의 hidden dimension 크기       # 논문 1024
+    total_sequence_length: int = 512  # 최대 시퀀스(토큰) 길이        # 논문 1376 # bart position embedding최대 길이 1024
+    otsl_max_length: int = 30
+    image_size: int = 224  
+    swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
     
-    # 추론 관련
-    use_beam_search: bool = True
-    beam_size: int = 5
-    max_length: int = 1376
+    
+    image_path: str = './infer_images'
+    output_path: str = './infer_result'
+    
+    batch_size: int = 1
+    num_workers: int = 32

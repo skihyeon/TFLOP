@@ -2,9 +2,8 @@ import gradio as gr
 import torch
 from pathlib import Path
 from PIL import Image
-import tempfile
 from config import InferenceConfig
-from inference import TFLOPInferenceLightningModule, save_html, construct_table_html_pred
+from inference import TFLOPInferenceLightningModule, construct_table_html_pred
 from typing import Dict, Union, List, Tuple
 
 class TFLOPGradioInterface:
@@ -17,7 +16,10 @@ class TFLOPGradioInterface:
             
         # TFLOP 모델 초기화
         self.model = TFLOPInferenceLightningModule(self.config)
-        self.model.setup()
+        
+        # 체크포인트가 있다면 로드
+        if hasattr(self.config, 'checkpoint_path'):
+            self.model.load_from_checkpoint(self.config.checkpoint_path)
         
         # 모델을 GPU로 이동
         if torch.cuda.is_available():
@@ -35,25 +37,18 @@ class TFLOPGradioInterface:
     def predict(self, image) -> Tuple[str, str]:
         """이미지를 받아서 테이블 HTML 반환"""
         try:
-            # 임시 파일로 이미지 저장
-            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp_file:
-                if isinstance(image, str):
-                    # 이미 파일 경로인 경우
-                    image_path = image
-                else:
-                    # Gradio에서 전달된 이미지 객체인 경우
-                    image.save(tmp_file.name)
-                    image_path = tmp_file.name
+            # 이미지 전처리
+            if isinstance(image, str):
+                # 이미 파일 경로인 경우
+                image = Image.open(image).convert('RGB')
             
-            # 데이터 준비
+            # 배치 데이터 준비
+            processed_image = self.model.image_processor(image, return_tensors="pt")
             batch = {
-                'images': self.model.image_processor(
-                    Image.open(image_path).convert('RGB'),
-                    return_tensors="pt"
-                )['pixel_values'].to(self.device),
+                'images': processed_image['pixel_values'].to(self.device),
                 'bboxes': torch.zeros(
                     1, 
-                    self.config.total_sequence_length // 2, 
+                    self.config.total_sequence_length - self.config.otsl_max_length, 
                     4, 
                     device=self.device
                 ),
@@ -68,12 +63,18 @@ class TFLOPGradioInterface:
                     self.config.total_sequence_length,
                     dtype=torch.bool,
                     device=self.device
+                ),
+                'data_tag_mask': torch.zeros(
+                    1,
+                    self.config.total_sequence_length,
+                    dtype=torch.bool,
+                    device=self.device
                 )
             }
             
             # 추론
             with torch.no_grad():
-                outputs = self.model.model(batch)
+                outputs = self.model(batch)
                 
                 # 결과 처리
                 pred_tokens = outputs['tag_logits'][0].argmax(dim=-1)
@@ -83,7 +84,7 @@ class TFLOPGradioInterface:
                 html = construct_table_html_pred(
                     pred_otsl,
                     {},  # OCR 결과 없음
-                    outputs['pointer_logits'][0]
+                    outputs['pointer_logits'][0].cpu()
                 )
                 
                 # HTML 스타일 추가

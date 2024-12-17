@@ -28,7 +28,7 @@ class OTSLTokenizer:
     """
     def __init__(
         self,
-        otsl_sequence_length: int = 1376 // 2,  # 논문 4.2 Experimental Settings
+        otsl_sequence_length: int = 30,  # 논문 4.2 Experimental Settings
         pad_token: str = "[PAD]",
         unk_token: str = "[UNK]",
         bos_token: str = "[BOS]",
@@ -231,10 +231,3 @@ class OTSLTokenizer:
         text = re.sub(r'\s+([CLUX])\s+', r' \1 ', text)
         return text.strip()
     
-    def convert_html_to_otsl(self, html: str) -> str:
-        """HTML을 OTSL로 변환 (구현 필요)"""
-        raise NotImplementedError("HTML to OTSL conversion not implemented yet")
-    
-    def convert_otsl_to_html(self, otsl: str) -> str:
-        """OTSL을 HTML로 변환 (구현 필요)"""
-        raise NotImplementedError("OTSL to HTML conversion not implemented yet")

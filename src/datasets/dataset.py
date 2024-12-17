@@ -16,8 +16,8 @@ from config import ModelConfig
 # 디버그 모드 설정
 DEBUG = True
 DEBUG_SAMPLES = {
-    'train': 10000,
-    'val': 100
+    'train': 1280,
+    'val': 64
 }
 
 class TableDataset(Dataset):
@@ -40,9 +40,9 @@ class TableDataset(Dataset):
         self.data_dir = data_dir
         self.split = split
         self.image_size = image_size
-        
+        self.config = ModelConfig()
         # 고정된 길이 설정
-        self.layout_prompt_length = self.otsl_sequence_length = tokenizer.otsl_sequence_length
+        self.layout_prompt_length = self.config.total_sequence_length - self.config.otsl_max_length
         
         # 이미지 전처리
         self.transform = transforms.Compose([
@@ -67,6 +67,17 @@ class TableDataset(Dataset):
         self.image_names = []
         filtered_count = 0
         
+        # 토큰 통계를 위한 카운터 초기화
+        token_counts = {
+            '[BOS]': 0,
+            '[EOS]': 0,
+            'C': 0, 
+            'NL': 0,
+            'L': 0,
+            'U': 0,
+            'X': 0
+        }
+        
         with jsonlines.open(ann_file) as reader:
             for ann in reader:
                 if DEBUG and len(self.image_names) >= DEBUG_SAMPLES[self.split]:
@@ -77,19 +88,6 @@ class TableDataset(Dataset):
                     if otsl_tokens_list is None:
                         filtered_count += 1
                         continue
-                    # for debug
-                    # if len(otsl_tokens_list) > 30:
-                    #     filtered_count += 1
-                    #     continue
-                    # if self.split == 'train' and ('U' not in otsl_tokens_list or 'X' not in otsl_tokens_list or 'L' not in otsl_tokens_list):
-                    #     filtered_count += 1
-                    #     continue
-                    if self.split == 'train' and len(otsl_tokens_list) > 30 and ('U' in otsl_tokens_list or 'X' in otsl_tokens_list or 'L' in otsl_tokens_list):
-                        filtered_count += 1
-                        continue
-                    if self.split == 'val' and len(otsl_tokens_list) > 30 and ('U' in otsl_tokens_list or 'X' in otsl_tokens_list or 'L' in otsl_tokens_list):
-                        filtered_count += 1
-                        continue
                     
                     # 길이 검증
                     num_boxes = len(ann['html']['cells'])
@@ -97,9 +95,16 @@ class TableDataset(Dataset):
                     
                     # layout prompt와 otsl sequence 각각의 길이 제한 검증 && otsl sequence에서 BOS, EOS 토큰 제외
                     if (num_boxes > self.layout_prompt_length -2 or 
-                        otsl_length > self.otsl_sequence_length - 2):
+                        otsl_length > self.config.otsl_max_length - 2):
                         filtered_count += 1
                         continue
+                    
+                    # 토큰 카운트 업데이트
+                    token_counts['[BOS]'] += 1
+                    token_counts['[EOS]'] += 1
+                    for token in otsl_tokens_list:
+                        if token in token_counts:
+                            token_counts[token] += 1
                     
                     image_name = ann['filename']
                     self.annotations[image_name] = {
@@ -116,7 +121,12 @@ class TableDataset(Dataset):
         print(f"\nDataset {self.split}:")
         print(f"Valid samples: {len(self.image_names)}")
         print(f"Filtered: {filtered_count}")
-    
+        
+        # 토큰 분포 출력
+        print("\n=== Token Distribution Debug ===")
+        print("Token Distributions:")
+        for token, count in token_counts.items():
+            print(f"  {token:<7}: {count:>4}")
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         image_name = self.image_names[idx]
         ann = self.annotations[image_name]
@@ -146,7 +156,10 @@ class TableDataset(Dataset):
         cell_idx = 0
         
         for pos in token_positions:
-            if cell_idx < len(ann['html']['cells']) and ann['has_data_flags_list'][pos]:
+            if cell_idx >= len(ann['html']['cells']):
+                break
+            
+            if ann['has_data_flags_list'][pos]:
                 cell = ann['html']['cells'][cell_idx]
                 if 'bbox' in cell:
                     x0, y0, x1, y1 = cell['bbox']
@@ -155,7 +168,8 @@ class TableDataset(Dataset):
                     bboxes.append(normalized_bbox)
                     cells.append({
                         'bbox': normalized_bbox,
-                        'sequence_pos': pos  # 실제 sequence 내 위치
+                        'sequence_pos': pos,
+                        'cell_idx': cell_idx
                     })
             cell_idx += 1
             
@@ -163,28 +177,23 @@ class TableDataset(Dataset):
         if not cells:
             raise ValueError(f"No valid cells found in {image_name}")
         
-        # 3. data tag set D 정의 (실제 text가 있는 C 태그)
-        has_data = [False]  # BOS 토큰
+        # 3. data tag set D 정의 수정
+        has_data = []
+        has_data.append(False)  # BOS
         for token_id, has_text in zip(ann['otsl_tokens_list'], ann['has_data_flags_list']):
             if token_id == 'C' and has_text:
                 has_data.append(True)
             else:
                 has_data.append(False)
+        has_data.append(False)  # EOS
+        
+        # padding을 위해 최대 길이까지 False로 채우기
+        while len(has_data) < self.config.otsl_max_length:
+            has_data.append(False)
         
         # 4. box-tag 매핑 생성 (many-to-one 관계 지원)
-        current_mappings = [[] for _ in range(len(bboxes))]
-        for i, bbox in enumerate(bboxes):
-            for cell in cells:
-                if self.bbox_belongs_to_cell(bbox, cell['bbox']):
-                    current_mappings[i].append(cell['sequence_pos'])
+        current_mappings = self._create_box_tag_mappings(bboxes, cells, ann['otsl_tokens_list'])
         
-        # print("\nDataset __getitem__:")
-        # print(f"Number of bboxes: {len(bboxes)}")
-        # print(f"Number of cells: {len(cells)}")
-        # print(f"Token positions: {token_positions}")
-        # for i, mappings in enumerate(current_mappings):
-            # print(f"Box {i} mapped to sequence positions: {mappings}")
-                
         bbox_with_text = {}
         for i, cell in enumerate(ann['html']['cells']):
             tokens = cell.get('tokens', [])  # tokens가 없을 경우 빈 리스트 반환
@@ -197,8 +206,8 @@ class TableDataset(Dataset):
                     'text': text
                 }
                     
+
         
-            
         return {
             'image_name': image_name,
             'image': image,                            # (3, 1024, 1024)
@@ -214,16 +223,24 @@ class TableDataset(Dataset):
         }
 
     def bbox_belongs_to_cell(self, bbox1, bbox2):
-        """두 bbox가 치는지 확인"""
-        x1, y1, x2, y2 = bbox1
-        cx1, cy1, cx2, cy2 = bbox2
+        """두 bbox의 IoU나 overlap 비율로 판단"""
+        def compute_area(box):
+            return (box[2] - box[0]) * (box[3] - box[1])
         
-        # bbox의 중심점이 cell 내부에 있는지 확인
-        center_x = (x1 + x2) / 2
-        center_y = (y1 + y2) / 2
+        # intersection 계산
+        x1 = max(bbox1[0], bbox2[0])
+        y1 = max(bbox1[1], bbox2[1])
+        x2 = min(bbox1[2], bbox2[2])
+        y2 = min(bbox1[3], bbox2[3])
         
-        return (cx1 <= center_x <= cx2 and 
-                cy1 <= center_y <= cy2)
+        if x2 <= x1 or y2 <= y1:
+            return False
+        
+        intersection = (x2 - x1) * (y2 - y1)
+        bbox1_area = compute_area(bbox1)
+        
+        # bbox1의 50% 이상이 cell 내부에 있어야 함
+        return intersection / bbox1_area > 0.5
     
     def tokens_to_text(self, tokens):
         # HTML 태그 제거 (<b>, </b> 등)
@@ -231,6 +248,50 @@ class TableDataset(Dataset):
         # 토큰들을 하나의 문자열로 합치기
         text = ''.join(text_tokens)
         return text
+
+
+    
+    def _create_box_tag_mappings(self, bboxes, cells, otsl_tokens_list):
+        """박스와 태그 간의 매핑을 생성"""
+        current_mappings = [[] for _ in range(len(bboxes))]
+        cell_idx = 0
+        
+        # OTSL sequence에서 C 태그의 위치를 추적하되, span 정보도 함께 저장
+        token_to_cell_idx = {}  # sequence position -> cell_idx 매핑
+        current_cell_idx = 0
+        
+        for i, token in enumerate(otsl_tokens_list):
+            if token == 'C':
+                token_to_cell_idx[i] = current_cell_idx
+                current_cell_idx += 1
+            elif token in ['L', 'U', 'X']:  # span 태그들도 cell_idx에 매핑
+                token_to_cell_idx[i] = current_cell_idx - 1  # 이전 셀에 연결
+        
+        # 각 bbox에 대해 매핑 생성
+        for i, bbox in enumerate(bboxes):
+            for cell in cells:
+                if self.bbox_belongs_to_cell(bbox, cell['bbox']):
+                    sequence_pos = cell['sequence_pos']
+                    if sequence_pos < self.config.otsl_max_length:
+                        # span된 셀의 경우 관련된 모든 position을 매핑에 추가
+                        for pos, idx in token_to_cell_idx.items():
+                            if idx == cell_idx:
+                                current_mappings[i].append(pos)
+                    cell_idx += 1
+        
+        # Debug information
+        # print(f"\n=== Box-Tag Mapping Debug ===")
+        # print(f"Number of boxes: {len(bboxes)}")
+        # print(f"Number of cells: {len(cells)}")
+        # print(f"OTSL sequence: {' '.join(otsl_tokens_list)}")
+        # print(f"Token to cell mapping: {token_to_cell_idx}")
+        # for i, mapping in enumerate(current_mappings):
+        #     if mapping:
+        #         print(f"Box {i}: mapped to positions {mapping}")
+        #     else:
+        #         print(f"Box {i}: no mapping")
+        
+        return current_mappings
 
 
     def __len__(self) -> int:

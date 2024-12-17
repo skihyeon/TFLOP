@@ -19,7 +19,7 @@ class TableDataModule(pl.LightningDataModule):
         
         # 토크나이저 직접 초기화
         self.tokenizer = OTSLTokenizer(
-            otsl_sequence_length=model_config.total_sequence_length // 2
+            otsl_sequence_length=model_config.otsl_max_length
         )
         
     def setup(self, stage: Optional[str] = None):

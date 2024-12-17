@@ -566,101 +566,83 @@ def extract_spans_from_otsl(otsl_tokens: List[int], tokenizer: OTSLTokenizer) ->
                     
     return row_span_matrix, col_span_matrix
 
-
-
-def compute_span_coefficients(
-    row_span_matrix: np.ndarray,  # (rows, cols)
-    col_span_matrix: np.ndarray,  # (rows, cols)
-) -> Tuple[np.ndarray, np.ndarray]:
-    """span coefficient matrices 계산
-    
-    Args:
-        row_span_matrix: 각 셀의 row span 값을 나타내는 행렬 (NL 태그 포함)
-        col_span_matrix: 각 셀의 column span 값을 나타내는 행렬 (NL 태그 포함)
-        
-    Returns:
-        row_coef: (rows, cols, rows, cols) - row-wise coefficients
-        col_coef: (rows, cols, rows, cols) - column-wise coefficients
-    """
+def compute_span_coefficients(row_span_matrix: np.ndarray, col_span_matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     rows, cols = row_span_matrix.shape
     real_cols = cols - 1  # NL 태그 제외
     
-    # 결과 matrices 초기화
-    row_coef = np.zeros((rows, real_cols, rows, real_cols))
-    col_coef = np.zeros((rows, real_cols, rows, real_cols))
+    # 1. Create coordinate matrices
+    i_coords = np.arange(rows)[:, None, None, None]  # (rows, 1, 1, 1)
+    j_coords = np.arange(real_cols)[None, :, None, None]  # (1, real_cols, 1, 1)
+    p_coords = np.arange(rows)[None, None, :, None]  # (1, 1, rows, 1)
+    q_coords = np.arange(real_cols)[None, None, None, :]  # (1, 1, 1, real_cols)
     
-    # 각 셀 pair에 대해 coefficient 계산
-    for i in range(rows):
-        for j in range(real_cols):
-            for p in range(rows):
-                for q in range(real_cols):
-                    # Row-wise coefficient 계산 (column 방향으로 투영)
-                    if i == p:  # 같은 행의 셀들
-                        # 1. 같은 span 내에 있는지 확인
-                        if (col_span_matrix[i,j] == col_span_matrix[p,q] and 
-                            row_span_matrix[i,j] == row_span_matrix[p,q]):
-                            # 시작점이 같은지 확인 (왼쪽으로 가면서)
-                            curr_j, curr_q = j, q
-                            while curr_j > 0 and col_span_matrix[i, curr_j-1] > 1:
-                                curr_j -= 1
-                            while curr_q > 0 and col_span_matrix[p, curr_q-1] > 1:
-                                curr_q -= 1
-                            
-                            if curr_j == curr_q:  # 같은 span 내에 있음
-                                row_coef[i,j,p,q] = 1.0
-                                continue
-                        
-                        # 2. column 방향으로 투영했을 때 overlap 계산
-                        span_i = row_span_matrix[i,j]  # 현재 셀의 row span
-                        span_p = row_span_matrix[p,q]  # 대상 셀의 row span
-                        
-                        # 두 셀이 column 방향으로 겹치는지 확인
-                        if min(i + span_i, p + span_p) > max(i, p):
-                            overlap = min(i + span_i, p + span_p) - max(i, p) 
-                            row_coef[i,j,p,q] = overlap / (span_i * span_p)
-                    
-                    # Column-wise coefficient 계산 (row 방향으로 투영)
-                    if j == q:  # 같은 열의 셀들
-                        # 1. 같은 span 내에 있는지 확인
-                        if (row_span_matrix[i,j] == row_span_matrix[p,q] and 
-                            col_span_matrix[i,j] == col_span_matrix[p,q]):
-                            # 시작점이 같은지 확인 (위로 올라가면서)
-                            curr_i, curr_p = i, p
-                            while curr_i > 0 and row_span_matrix[curr_i-1, j] > 1:
-                                curr_i -= 1
-                            while curr_p > 0 and row_span_matrix[curr_p-1, q] > 1:
-                                curr_p -= 1
-                            
-                            if curr_i == curr_p:  # 같은 span 내에 있음
-                                col_coef[i,j,p,q] = 1.0
-                                continue
-                        
-                        # 2. row 방향으로 투영했을 때 overlap 계산
-                        span_i = col_span_matrix[i,j]  # 현재 셀의 column span
-                        span_p = col_span_matrix[p,q]  # 대상 셀의 column span
-                        
-                        # 두 셀이 row 방향으로 겹치는지 확인
-                        if min(j + span_i, q + span_p) > max(j, q):
-                            overlap = min(j + span_i, q + span_p) - max(j, q)
-                            col_coef[i,j,p,q] = overlap / (span_i * span_p)
+    # 2. Broadcast span values
+    span_i_row = row_span_matrix[:, :real_cols, None, None]  # (rows, real_cols, 1, 1)
+    span_p_row = row_span_matrix[None, None, :, :real_cols]  # (1, 1, rows, real_cols)
+    
+    span_i_col = col_span_matrix[:, :real_cols, None, None]  # (rows, real_cols, 1, 1)
+    span_p_col = col_span_matrix[None, None, :, :real_cols]  # (1, 1, rows, real_cols)
+    
+    # 3. Row-wise overlap computation
+    row_min = np.minimum(i_coords + span_i_row, p_coords + span_p_row)
+    row_max = np.maximum(i_coords, p_coords)
+    row_overlap = np.maximum(row_min - row_max, 0)
+    row_coef = np.where(
+        row_overlap > 0,
+        row_overlap / (span_i_row * span_p_row),
+        -1.0
+    )
+    
+    # 4. Column-wise overlap computation
+    col_min = np.minimum(j_coords + span_i_col, q_coords + span_p_col)
+    col_max = np.maximum(j_coords, q_coords)
+    col_overlap = np.maximum(col_min - col_max, 0)
+    col_coef = np.where(
+        col_overlap > 0,
+        col_overlap / (span_i_col * span_p_col),
+        -1.0
+    )
     
     return row_coef, col_coef
 
-def pad_coef_matrix(
-    coef: np.ndarray,  # (rows, cols, rows, cols)
-    target_size: int,  # 패딩 후 목표 크기
-) -> torch.Tensor:
-    """coefficient matrix를 목표 크기로 패딩"""
-    rows, cols, _, _ = coef.shape
-    padded = torch.full((target_size, target_size), -1)
+# def compute_span_coefficients(row_span_matrix: np.ndarray, col_span_matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+#     rows, cols = row_span_matrix.shape
+#     real_cols = cols - 1  # NL 태그 제외
     
-    # 4D를 2D로 변환하면서 패딩
+#     row_coef = np.full((rows, real_cols, rows, real_cols), -1.0)  # invalid pair는 -1
+#     col_coef = np.full((rows, real_cols, rows, real_cols), -1.0)
+    
+#     for i in range(rows):
+#         for j in range(real_cols):
+#             for p in range(rows):
+#                 for q in range(real_cols):
+#                     # Row-wise: 같은 행이거나 span overlap이 있는 경우
+#                     span_i_row = row_span_matrix[i,j]
+#                     span_p_row = row_span_matrix[p,q]
+#                     if min(i + span_i_row, p + span_p_row) > max(i, p):
+#                         overlap = min(i + span_i_row, p + span_p_row) - max(i, p)
+#                         row_coef[i,j,p,q] = overlap / (span_i_row * span_p_row)
+                    
+#                     # Column-wise: 같은 열이거나 span overlap이 있는 경우
+#                     span_i_col = col_span_matrix[i,j]
+#                     span_p_col = col_span_matrix[p,q]
+#                     if min(j + span_i_col, q + span_p_col) > max(j, q):
+#                         overlap = min(j + span_i_col, q + span_p_col) - max(j, q)
+#                         col_coef[i,j,p,q] = overlap / (span_i_col * span_p_col)
+    
+#     return row_coef, col_coef
+
+def pad_coef_matrix(coef: np.ndarray, target_size: int) -> torch.Tensor:
+    rows, cols, _, _ = coef.shape
+    # -1 대신 0으로 패딩 (valid pair는 0 이상)
+    padded = torch.zeros((target_size, target_size))
+    
     for i in range(rows):
         for j in range(cols):
             for p in range(rows):
                 for q in range(cols):
-                    if coef[i,j,p,q] > 0:
-                        # (i,j)와 (p,q)의 위치를 1D 인덱스로 변환
+                    # 모든 valid pair 복사 (음수가 아닌 경우)
+                    if coef[i,j,p,q] >= 0:
                         idx1 = i * cols + j
                         idx2 = p * cols + q
                         padded[idx1, idx2] = coef[i,j,p,q]
@@ -676,57 +658,17 @@ def get_coef_matrix(
     """OTSL 토큰에서 span coefficient matrix 추출"""
     B = otsl_tokens.size(0)
     row_coefs, col_coefs = [], []
-    shapes = []
     for b in range(B):
         # 1. tensor -> list 변환 및 디코딩
         tokens = otsl_tokens[b].tolist()
-        # 2. span matrix 계산
         row_span_matrix, col_span_matrix = extract_spans_from_otsl(tokens, tokenizer)
-        # print("="*50)
-        # print("row span matrix")
-        # print(row_span_matrix)
-        # print("col span matrix")
-        # print(col_span_matrix)
-        # 3. coefficient matrix 계산
-        shapes.append(row_span_matrix.shape)
         row_coef, col_coef = compute_span_coefficients(
             row_span_matrix=row_span_matrix,
             col_span_matrix=col_span_matrix
         )
-        
-        # print("row coef shape")
-        # print(row_coef.shape)
-        # print("col coef shape")
-        # print(col_coef.shape)
-        # 4. 패딩
         row_coef_padded = pad_coef_matrix(row_coef, target_size)
         col_coef_padded = pad_coef_matrix(col_coef, target_size)
-        # print("row coef padded shape")
-        # print(row_coef_padded.shape)
-        # print("col coef padded shape")
-        # print(col_coef_padded.shape)
-        
-        # print("\n=== Original Coefficient Matrices (before padding) ===")
-        # print("Row-wise coefficients:")
-        # for i in range(row_coef.shape[0]):
-        #     for j in range(row_coef.shape[1]):
-        #         if np.any(row_coef[i,j] > 0):  # 유효한 계수가 있는 경우만
-        #             print(f"Cell ({i},{j}) coefficients:")
-        #             for p in range(row_coef.shape[2]):
-        #                 for q in range(row_coef.shape[3]):
-        #                     if row_coef[i,j,p,q] > 0:
-        #                         print(f"  -> ({p},{q}): {row_coef[i,j,p,q]:.2f}")
-        
-        # print("\nColumn-wise coefficients:")
-        # for i in range(col_coef.shape[0]):
-        #     for j in range(col_coef.shape[1]):
-        #         if np.any(col_coef[i,j] > 0):  # 유효한 계수가 있는 경우만
-        #             print(f"Cell ({i},{j}) coefficients:")
-        #             for p in range(col_coef.shape[2]):
-        #                 for q in range(col_coef.shape[3]):
-        #                     if col_coef[i,j,p,q] > 0:
-        #                         print(f"  -> ({p},{q}): {col_coef[i,j,p,q]:.2f}")
-        # raise ValueError("debug")
+
         row_coefs.append(row_coef_padded)
         col_coefs.append(col_coef_padded)
     
@@ -734,4 +676,4 @@ def get_coef_matrix(
     row_coefs = torch.stack(row_coefs)  # (B, 688, 688)
     col_coefs = torch.stack(col_coefs)  # (B, 688, 688)
     
-    return row_coefs, col_coefs, shapes
+    return row_coefs, col_coefs
