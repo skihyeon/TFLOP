@@ -120,6 +120,8 @@ def convert_html_to_otsl(ann: Dict) -> Tuple[List[str], List[bool]]:
         otsl_sequence: OTSL 토큰 시퀀스 (오류 시 None)
         has_data_1D_list: 각 셀의 데이터 존재 여부 (1D 리스트)
     """
+        
+        
     if 'html' not in ann or 'structure' not in ann['html'] or 'cells' not in ann['html']:
         print(f"Error: Missing required HTML structure")
         return None, []

@@ -118,6 +118,7 @@ class TableDataset(Dataset):
         print("Token Distributions:")
         for token, count in token_counts.items():
             print(f"  {token:<7}: {count:>4}")
+            
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         image_name = self.image_names[idx]
         ann = self.annotations[image_name]
@@ -127,25 +128,17 @@ class TableDataset(Dataset):
         if not os.path.exists(image_path):
             raise ValueError(f"Image file not found: {image_path}")
         
-        try:
-            image = Image.open(image_path).convert('RGB')
-        except Exception as e:
-            raise ValueError(f"Failed to load image {image_path}: {str(e)}")
-        
+        image = Image.open(image_path).convert('RGB')
         image_width, image_height = image.size
-        # image = self.transform(image)
         image = self.image_processor(image, return_tensors="pt")
         
-        # 1. C 태그의 sequence 내 실제 위치 추적
-        token_positions = []  # C 태그의 sequence 내 위치 저장
-        for j, token in enumerate(ann['otsl_tokens_list']):
-            if token == 'C':
-                token_positions.append(j) 
-
-            
-        # 1. 모든 셀에 대한 정보 수집
+        # C 태그 위치 추적
+        token_positions = [j for j, token in enumerate(ann['otsl_tokens_list']) if token == 'C']
+        
+        # cells, bboxes, text 정보 한번에 처리
         cells = []
         bboxes = []
+        bbox_with_text = {}
         cell_idx = 0
         
         for pos in token_positions:
@@ -153,86 +146,52 @@ class TableDataset(Dataset):
                 break
                 
             cell = ann['html']['cells'][cell_idx]
-            cell_info = {
-                'sequence_pos': pos,
-                'cell_idx': cell_idx,
-                'has_data': ann['has_data_flags_list'][pos]
-            }
+            cell_info = {'sequence_pos': pos, 'cell_idx': cell_idx}
             
-            # bbox가 있는 경우 추가
             if 'bbox' in cell:
                 x0, y0, x1, y1 = cell['bbox']
                 normalized_bbox = [x0/image_width, y0/image_height, 
                                 x1/image_width, y1/image_height]
-                cell_info['bbox'] = normalized_bbox
+                cell_info.update({
+                    'bbox': normalized_bbox,
+                    'has_data': True
+                })
                 bboxes.append(normalized_bbox)
                 
+                tokens = cell.get('tokens', [])
+                bbox_with_text[cell_idx] = {
+                    'bbox': cell['bbox'],
+                    'text': self.tokens_to_text(tokens) if tokens else ""
+                }
+            else:
+                cell_info['has_data'] = False
+            
             cells.append(cell_info)
             cell_idx += 1
-            
         
         if not cells:
             raise ValueError(f"No valid cells found in {image_name}")
         
-        # 3. data tag set D 정의 수정
-        has_data = []
-        has_data.append(False)  # BOS
-        for token_id, has_text in zip(ann['otsl_tokens_list'], ann['has_data_flags_list']):
-            if token_id == 'C' and has_text:
-                has_data.append(True)
-            else:
-                has_data.append(False)
-        has_data.append(False)  # EOS
-        
-        # padding을 위해 최대 길이까지 False로 채우기
-        while len(has_data) < self.config.otsl_max_length:
-            has_data.append(False)
-        
-        # box-tag 매핑 생성
+        # box-tag 매핑 생성 및 보정
         current_mappings = self._create_box_tag_mappings(bboxes, cells, ann['otsl_tokens_list'])
+        unmapped_boxes = set(range(len(bboxes))) - {idx for mappings in current_mappings.values() for idx in mappings}
         
-        # 매핑 검증 및 보정
-        for bbox_idx in range(len(bboxes)):
-            mapped = False
-            for cell_mappings in current_mappings.values():
-                if bbox_idx in cell_mappings:
-                    mapped = True
-                    break
-            
-            if not mapped:
-                # bbox가 있는 첫 번째 cell을 찾아서 매핑
-                for cell in cells:
-                    if 'bbox' in cell:
-                        current_mappings[cell['cell_idx']].append(bbox_idx)
-                        print(f"Warning: Sample {idx}, Box {bbox_idx} mapped to default cell {cell['cell_idx']}")
-                        break
-        
-        
-        bbox_with_text = {}
-        for i, cell in enumerate(ann['html']['cells']):
-            tokens = cell.get('tokens', [])  # tokens가 없을 경우 빈 리스트 반환
-            bbox = cell.get('bbox')          # bbox가 없을 수 있음
-            
-            if 'tokens' in cell:  # tokens 키가 존재하면 (빈 리스트여도) 처리
-                text = self.tokens_to_text(tokens) if tokens else ""
-                bbox_with_text[i] = {
-                    'bbox': bbox,  # bbox가 None일 수 있음
-                    'text': text
-                }
-                    
-
+        if unmapped_boxes:
+            default_cell = next(cell for cell in cells if 'bbox' in cell)
+            for bbox_idx in unmapped_boxes:
+                current_mappings[default_cell['cell_idx']].append(bbox_idx)
+                print(f"Warning: Sample {idx}, Box {bbox_idx} mapped to default cell {default_cell['cell_idx']}")
         
         return {
             'image_name': image_name,
-            'image': image,                            # (3, 1024, 1024)
-            'otsl_tokens_list': ann['otsl_tokens_list'], # (S)
-            'bboxes': bboxes,                          # (N, 4)
-            'num_boxes': len(bboxes),                  # N
+            'image': image,
+            'otsl_tokens_list': ann['otsl_tokens_list'],
+            'bboxes': bboxes,
+            'num_boxes': len(bboxes),
             'cells': cells,
             'html': ann['html'],
-            'has_data_flags_list': has_data,           # (S)
-            'box_mappings': current_mappings,          # (N, max_mappings)
-            'token_positions': token_positions,        # sequence 내 C 태그 위치 정보 추가
+            'box_mappings': current_mappings,
+            'token_positions': token_positions,
             'bbox_with_text': bbox_with_text
         }
 

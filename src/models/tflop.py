@@ -249,8 +249,6 @@ class TFLOP(nn.Module):
         
         # 3. Enhance visual features with layout information
         enhanced_visual_features = self.enhance_visual_features(visual_features, layout_prompt)
-        # 4. Prepare cross-attention mask
-        cross_attn_mask = self.prepare_cross_attention_mask(enhanced_visual_features, layout_prompt)
         
         if self.training:
             labels = batch['token_ids']     
@@ -276,7 +274,6 @@ class TFLOP(nn.Module):
                 inputs_embeds=prompt_inputs,
                 attention_mask=padding_mask,  # padding mask만 전달
                 encoder_hidden_states=enhanced_visual_features,
-                # encoder_attention_mask=cross_attn_mask,
                 use_cache=False,
                 output_hidden_states=True,
                 return_dict=True
@@ -318,7 +315,6 @@ class TFLOP(nn.Module):
                     inputs_embeds=prompt_inputs,
                     attention_mask=attention_mask,
                     encoder_hidden_states=enhanced_visual_features,
-                    # encoder_attention_mask=cross_attn_mask,
                     use_cache=True,
                     output_hidden_states=True,
                     return_dict=True
@@ -326,16 +322,7 @@ class TFLOP(nn.Module):
                 
                 last_hidden_state = decoder_outputs.last_hidden_state
                 logits = self.output_projection(last_hidden_state[:, -1:])
-                
-                # Nucleus sampling with constraints
-                next_token = self.constrained_nucleus_sampling(
-                    logits.squeeze(1),
-                    curr_ids,
-                    p=0.9,
-                    temperature=0.7
-                )
-                
-                
+                next_token = torch.argmax(logits.squeeze(1), dim=-1, keepdim=True)
                 curr_ids = torch.cat([curr_ids, next_token], dim=1)
             
             # training과 동일한 입력 형태 구성
@@ -363,8 +350,7 @@ class TFLOP(nn.Module):
         
         pointer_logits, empty_pointer_logits = self.layout_pointer(
             box_features=bbox_embeddings,
-            tag_features=logical_structure_embeddings,
-            data_tag_mask=data_tag_mask,
+            tag_features=logical_structure_embeddings
         )
     
 
@@ -436,123 +422,3 @@ class TFLOP(nn.Module):
         relative_buckets = torch.clamp(relative_buckets, 0, max_distance - 1)
         
         return relative_buckets
-    
-    def constrained_nucleus_sampling(
-        self,
-        logits: torch.Tensor,  # (B, vocab_size)
-        current_tokens: torch.Tensor,  # (B, curr_length)
-        p: float = 0.9,
-        temperature: float = 0.7
-    ) -> torch.Tensor:
-        """OTSL 문법 규칙을 고려한 Nucleus (top-p) sampling
-
-        Args:
-            logits: 토큰 예측을 위한 logits
-            current_tokens: 현재까지 생성된 토큰들
-            p: nucleus sampling의 확률 임계값
-            temperature: 샘플링 temperature
-        """
-        valid_mask = torch.ones_like(logits, dtype=torch.bool)
-        
-        for b in range(current_tokens.size(0)):
-            curr_seq = current_tokens[b]
-            curr_row_idx = (curr_seq == self.tokenizer.nl_token_id).sum()
-            curr_col_idx = curr_seq.size(0) - curr_seq.eq(self.tokenizer.nl_token_id).sum() - 1
-            
-            # 모든 제약 조건 적용 전에 최소한 C 토큰은 항상 가능하도록 설정
-            valid_mask[b, self.tokenizer.c_token_id] = True
-            
-            # 1. 마지막 토큰이 NL이어야 함 (max_length-2 위치에서)
-            if curr_seq.size(0) == self.tokenizer.otsl_sequence_length - 1:
-                valid_mask[b, :] = False
-                valid_mask[b, self.tokenizer.nl_token_id] = True
-                continue  # 다른 제약조건 확인 불필요
-            
-            # 2. 연속된 NL 방지
-            if curr_seq[-1] == self.tokenizer.nl_token_id:
-                valid_mask[b, self.tokenizer.nl_token_id] = False
-            
-            # 3. 최소 2개의 real column 보장
-            if curr_col_idx == 0:  # 첫 번째 컬럼일 때
-                valid_mask[b, self.tokenizer.nl_token_id] = False  # NL 방지
-            
-            # 4. 최소 2개의 row 보장
-            if curr_row_idx == 0:  # 첫 번째 행일 때
-                if curr_col_idx < 1:  # 최소 2개의 컬럼이 없으면
-                    valid_mask[b, self.tokenizer.nl_token_id] = False  # NL 방지
-
-            # OTSL 문법 규칙
-            # 첫 번째 행은 L과 C만 허용
-            if curr_row_idx == 0:
-                valid_mask[b, self.tokenizer.u_token_id] = False
-                valid_mask[b, self.tokenizer.x_token_id] = False
-            
-            # 첫 번째 열은 U와 C만 허용
-            if curr_col_idx == 0:
-                valid_mask[b, self.tokenizer.l_token_id] = False
-                valid_mask[b, self.tokenizer.x_token_id] = False
-                
-            # L 토큰의 왼쪽은 L 또는 C여야 함
-            if curr_col_idx > 0 and curr_seq[-1] == self.tokenizer.l_token_id:
-                if curr_seq[-2] not in [self.tokenizer.c_token_id, self.tokenizer.l_token_id]:
-                    valid_mask[b, self.tokenizer.l_token_id] = False
-                    
-            # U 토큰의 위쪽은 U 또는 C여야 함
-            if curr_row_idx > 0:
-                prev_row_tokens = current_tokens[b][:-curr_col_idx-1]
-                if prev_row_tokens[-1] not in [self.tokenizer.c_token_id, self.tokenizer.u_token_id]:
-                    valid_mask[b, self.tokenizer.u_token_id] = False
-
-            # X 토큰 규칙
-            if curr_row_idx > 0 and curr_col_idx > 0:
-                left_token = curr_seq[-1]
-                if left_token not in [self.tokenizer.x_token_id, self.tokenizer.u_token_id]:
-                    valid_mask[b, self.tokenizer.x_token_id] = False
-                
-                up_token = current_tokens[b][:-curr_col_idx-1][-1]
-                if up_token not in [self.tokenizer.x_token_id, self.tokenizer.l_token_id]:
-                    valid_mask[b, self.tokenizer.x_token_id] = False
-
-            # 모든 토큰이 마스킹된 경우 C 토큰은 허용
-            if not valid_mask[b].any():
-                valid_mask[b, self.tokenizer.c_token_id] = True
-
-        # Temperature scaling
-        logits = logits / temperature
-        
-        # 마스킹 적용
-        logits = logits.masked_fill(~valid_mask, float('-inf'))
-        
-        # Nucleus sampling
-        probs = F.softmax(logits, dim=-1)
-        
-        # 수치 안정성을 위한 확인
-        if torch.isnan(probs).any() or torch.isinf(probs).any():
-            # fallback: 유효한 토큰 중에서 균등하게 선택
-            probs = valid_mask.float()
-            probs = probs / probs.sum(dim=-1, keepdim=True)
-        
-        sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
-        
-        # cumsum 대신 직접 계산
-        cumulative_probs = torch.zeros_like(sorted_probs)
-        for i in range(sorted_probs.size(-1)):
-            if i == 0:
-                cumulative_probs[..., i] = sorted_probs[..., i]
-            else:
-                cumulative_probs[..., i] = cumulative_probs[..., i-1] + sorted_probs[..., i]
-        
-        # 임계값 p를 넘는 확률 마스킹
-        sorted_indices_to_remove = cumulative_probs > p
-        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-        sorted_indices_to_remove[..., 0] = False
-        
-        # 마스킹 적용 및 재정규화
-        sorted_probs = sorted_probs.masked_fill(sorted_indices_to_remove, 0.0)
-        sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
-        
-        # 5. 샘플링
-        sampled_indices = torch.multinomial(sorted_probs, num_samples=1)
-        next_tokens = torch.gather(sorted_indices, -1, sampled_indices)
-        
-        return next_tokens

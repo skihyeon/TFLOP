@@ -32,8 +32,7 @@ class LayoutPointer(nn.Module):
         # empty embedding
         nn.init.normal_(self.empty_box_embedding, mean=0.0, std=0.02)
     
-    def forward(self, box_features: torch.Tensor, tag_features: torch.Tensor, 
-                data_tag_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward(self, box_features: torch.Tensor, tag_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
             box_features: (B, 994, feature_dim) - bbox embeddings
