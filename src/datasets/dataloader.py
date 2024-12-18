@@ -31,46 +31,46 @@ def collate_fn(batch, tokenizer):
         padded_bboxes[i, :n_box] = torch.tensor(sample['bboxes'][:n_box])
     
     # 4. box indices 처리
-    max_mappings = max(max(len(m) for m in sample['box_mappings']) for sample in batch)
+    max_mappings = max(
+        max(len(mappings) for mappings in sample['box_mappings'].values())
+        for sample in batch
+    )
     box_indices = torch.full((batch_size, layout_prompt_length, max_mappings), -1)
     
     # box_mappings 값을 box_indices에 채우기
     for i, sample in enumerate(batch):
-        for box_idx, mappings in enumerate(sample['box_mappings']):
-            if box_idx < layout_prompt_length:  # layout prompt 길이 체크
-                if mappings:  # 매핑이 있는 경우
-                    for j, pos in enumerate(mappings):
-                        if j < max_mappings:  # max_mappings 범위 체크
-                            # 이미 dataset에서 올바른 position을 반환하므로 추가 조정 불필요
-                            if pos < config.otsl_max_length:  # 시퀀스 길이 체크
-                                box_indices[i, box_idx, j] = pos
-                            else:
-                                print(f"Warning: Position {pos} exceeds max length for batch {i}, box {box_idx}")
+        for cell_idx, bbox_indices in sample['box_mappings'].items():
+            if cell_idx < layout_prompt_length:  # layout prompt 길이 체크
+                for j, bbox_idx in enumerate(bbox_indices):
+                    if j < max_mappings:  # max_mappings 범위 체크
+                        # sequence_pos 찾기
+                        for cell in sample['cells']:
+                            if cell['cell_idx'] == cell_idx:
+                                sequence_pos = cell['sequence_pos']
+                                if 0 <= sequence_pos < config.otsl_max_length:
+                                    box_indices[i, bbox_idx, j] = sequence_pos
     
     # 5. attention mask, data tag mask, empty tag mask 처리
     total_length = layout_prompt_length + config.otsl_max_length
     attention_mask = torch.zeros(batch_size, total_length, dtype=torch.bool)
-    data_tag_mask = torch.zeros(batch_size, total_length, dtype=torch.bool)  # non-empty C 태그용
-    empty_tag_mask = torch.zeros(batch_size, total_length, dtype=torch.bool)  # empty C 태그용
+    data_tag_mask = torch.zeros(batch_size, total_length, dtype=torch.bool)
+    empty_tag_mask = torch.zeros(batch_size, total_length, dtype=torch.bool)
     
     for i, sample in enumerate(batch):
-        # 1. attention mask 처리
-        # - layout prompt 부분 (bboxes가 있는 부분까지만)
-        attention_mask[i, :sample['num_boxes']] = True
-        # - OTSL sequence 부분 (실제 토큰이 있는 부분까지만)
+        # 실제 토큰이 있는 위치까지만 attention mask 설정
         seq_length = len(sample['otsl_tokens_list'])
-        attention_mask[i, layout_prompt_length:layout_prompt_length + seq_length] = True
+        attention_mask[i, :layout_prompt_length + seq_length] = True
         
-        # 2. data tag masks 처리
-        for j, (token, has_data) in enumerate(zip(sample['otsl_tokens_list'], sample['has_data_flags_list'])):
-            if token == 'C':
-                pos = layout_prompt_length + j
-                if has_data:
-                    # non-empty C 태그
-                    data_tag_mask[i, pos] = True
+        # data tag mask와 empty tag mask 설정
+        for cell in sample['cells']:
+            pos = cell['sequence_pos']
+            if 0 <= pos < config.otsl_max_length:
+                if cell['has_data']:
+                    # 데이터가 있는 셀
+                    data_tag_mask[i, layout_prompt_length + pos] = True
                 else:
-                    # empty C 태그
-                    empty_tag_mask[i, pos] = True
+                    # 빈 셀 (데이터가 없는 셀)
+                    empty_tag_mask[i, layout_prompt_length + pos] = True
 
     return {
         'image_names': image_names,

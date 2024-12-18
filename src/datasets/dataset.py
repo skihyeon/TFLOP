@@ -44,15 +44,6 @@ class TableDataset(Dataset):
         # 고정된 길이 설정
         self.layout_prompt_length = self.config.total_sequence_length - self.config.otsl_max_length
         
-        # 이미지 전처리
-        self.transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
-        ])
         self.image_processor = AutoImageProcessor.from_pretrained(ModelConfig.swin_model_name)
         self.image_processor.size = (image_size, image_size)
         
@@ -150,27 +141,33 @@ class TableDataset(Dataset):
         for j, token in enumerate(ann['otsl_tokens_list']):
             if token == 'C':
                 token_positions.append(j) 
-        # 2. Bounding boxes와 cells 정보 추출
-        bboxes = []
+
+            
+        # 1. 모든 셀에 대한 정보 수집
         cells = []
+        bboxes = []
         cell_idx = 0
         
         for pos in token_positions:
             if cell_idx >= len(ann['html']['cells']):
                 break
+                
+            cell = ann['html']['cells'][cell_idx]
+            cell_info = {
+                'sequence_pos': pos,
+                'cell_idx': cell_idx,
+                'has_data': ann['has_data_flags_list'][pos]
+            }
             
-            if ann['has_data_flags_list'][pos]:
-                cell = ann['html']['cells'][cell_idx]
-                if 'bbox' in cell:
-                    x0, y0, x1, y1 = cell['bbox']
-                    normalized_bbox = [x0/image_width, y0/image_height, 
-                                    x1/image_width, y1/image_height]
-                    bboxes.append(normalized_bbox)
-                    cells.append({
-                        'bbox': normalized_bbox,
-                        'sequence_pos': pos,
-                        'cell_idx': cell_idx
-                    })
+            # bbox가 있는 경우 추가
+            if 'bbox' in cell:
+                x0, y0, x1, y1 = cell['bbox']
+                normalized_bbox = [x0/image_width, y0/image_height, 
+                                x1/image_width, y1/image_height]
+                cell_info['bbox'] = normalized_bbox
+                bboxes.append(normalized_bbox)
+                
+            cells.append(cell_info)
             cell_idx += 1
             
         
@@ -191,8 +188,25 @@ class TableDataset(Dataset):
         while len(has_data) < self.config.otsl_max_length:
             has_data.append(False)
         
-        # 4. box-tag 매핑 생성 (many-to-one 관계 지원)
+        # box-tag 매핑 생성
         current_mappings = self._create_box_tag_mappings(bboxes, cells, ann['otsl_tokens_list'])
+        
+        # 매핑 검증 및 보정
+        for bbox_idx in range(len(bboxes)):
+            mapped = False
+            for cell_mappings in current_mappings.values():
+                if bbox_idx in cell_mappings:
+                    mapped = True
+                    break
+            
+            if not mapped:
+                # bbox가 있는 첫 번째 cell을 찾아서 매핑
+                for cell in cells:
+                    if 'bbox' in cell:
+                        current_mappings[cell['cell_idx']].append(bbox_idx)
+                        print(f"Warning: Sample {idx}, Box {bbox_idx} mapped to default cell {cell['cell_idx']}")
+                        break
+        
         
         bbox_with_text = {}
         for i, cell in enumerate(ann['html']['cells']):
@@ -222,25 +236,20 @@ class TableDataset(Dataset):
             'bbox_with_text': bbox_with_text
         }
 
-    def bbox_belongs_to_cell(self, bbox1, bbox2):
-        """두 bbox의 IoU나 overlap 비율로 판단"""
-        def compute_area(box):
-            return (box[2] - box[0]) * (box[3] - box[1])
-        
-        # intersection 계산
+    def compute_overlap_ratio(self, bbox1, bbox2):
+        """두 bbox 간의 겹침 비율 계산"""
         x1 = max(bbox1[0], bbox2[0])
         y1 = max(bbox1[1], bbox2[1])
         x2 = min(bbox1[2], bbox2[2])
         y2 = min(bbox1[3], bbox2[3])
         
         if x2 <= x1 or y2 <= y1:
-            return False
+            return 0.0
         
         intersection = (x2 - x1) * (y2 - y1)
-        bbox1_area = compute_area(bbox1)
+        bbox1_area = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
         
-        # bbox1의 50% 이상이 cell 내부에 있어야 함
-        return intersection / bbox1_area > 0.5
+        return intersection / bbox1_area
     
     def tokens_to_text(self, tokens):
         # HTML 태그 제거 (<b>, </b> 등)
@@ -253,46 +262,115 @@ class TableDataset(Dataset):
     
     def _create_box_tag_mappings(self, bboxes, cells, otsl_tokens_list):
         """박스와 태그 간의 매핑을 생성"""
-        current_mappings = [[] for _ in range(len(bboxes))]
-        cell_idx = 0
+        # # 디버그 정보를 파일에 저장
+        # with open('debug.txt', 'a') as f:
+        #     f.write("\n=== Debug: Box Tag Mapping ===\n")
+        #     f.write(f"Number of bboxes: {len(bboxes)}\n")
+        #     f.write(f"Number of cells: {len(cells)}\n") 
+        #     f.write(f"OTSL sequence length: {len(otsl_tokens_list)}\n")
+            
+        #     f.write("\nOTSL Sequence:\n")
+        #     f.write(" ".join(otsl_tokens_list) + "\n")
+            
+        #     f.write("\nCell Information:\n")
+        #     for cell in cells:
+        #         f.write(f"Cell {cell['cell_idx']} at sequence pos {cell['sequence_pos']}:\n")
+        #         # bbox가 있는 경우에만 출력
+        #         if 'bbox' in cell:
+        #             f.write(f"  bbox: {cell['bbox']}\n")
+        #         else:
+        #             f.write("  bbox: None (empty cell)\n")
+            
+        #     f.write("\nBBox Information:\n")
+        #     for i, bbox in enumerate(bboxes):
+        #         f.write(f"Box {i}: {bbox}\n")
         
-        # OTSL sequence에서 C 태그의 위치를 추적하되, span 정보도 함께 저장
-        token_to_cell_idx = {}  # sequence position -> cell_idx 매핑
+        # cells의 sequence_pos -> cell_idx 매핑 생성 (bbox가 있는 셀만)
+        seq_pos_to_cell_idx = {
+            cell['sequence_pos']: cell['cell_idx'] 
+            for cell in cells 
+            if 'bbox' in cell
+        }
+        
+        # bbox가 있는 셀에 대해서만 매핑 생성
+        current_mappings = {
+            cell['cell_idx']: [] 
+            for cell in cells 
+            if 'bbox' in cell
+        }
+        
+        token_to_cell_idx = {}
         current_cell_idx = 0
+        current_row_start_idx = 0
+        prev_row_start_idx = 0
         
+        # OTSL 시퀀스 처리 - span 태그 포함
+        # with open('debug.txt', 'a') as f:
+        #     f.write("\nToken to Cell Index Mapping:\n")
         for i, token in enumerate(otsl_tokens_list):
             if token == 'C':
-                token_to_cell_idx[i] = current_cell_idx
+                # 현재 position이 실제 cell과 매핑되는지 확인
+                if i in seq_pos_to_cell_idx:
+                    token_to_cell_idx[i] = seq_pos_to_cell_idx[i]
                 current_cell_idx += 1
-            elif token in ['L', 'U', 'X']:  # span 태그들도 cell_idx에 매핑
-                token_to_cell_idx[i] = current_cell_idx - 1  # 이전 셀에 연결
-        
-        # 각 bbox에 대해 매핑 생성
-        for i, bbox in enumerate(bboxes):
+                # f.write(f"Token {i} (C) -> Cell {current_cell_idx-1}\n")
+            elif token == 'L':
+                if current_cell_idx > current_row_start_idx:
+                    token_to_cell_idx[i] = current_cell_idx - 1
+                    # f.write(f"Token {i} (L) -> Cell {current_cell_idx - 1}\n")
+            elif token == 'U':
+                cells_in_prev_row = current_row_start_idx - prev_row_start_idx
+                relative_pos = (current_cell_idx - current_row_start_idx)
+                if cells_in_prev_row > relative_pos:
+                    mapped_cell = prev_row_start_idx + relative_pos
+                    token_to_cell_idx[i] = mapped_cell
+                    # f.write(f"Token {i} (U) -> Cell {mapped_cell}\n")
+            elif token == 'X':
+                if current_cell_idx > current_row_start_idx:
+                    left_cell_idx = current_cell_idx - 1
+                    cells_in_prev_row = current_row_start_idx - prev_row_start_idx
+                    relative_pos = (current_cell_idx - current_row_start_idx)
+                    if cells_in_prev_row > relative_pos:
+                        up_cell_idx = prev_row_start_idx + relative_pos
+                        mapped_cell = min(left_cell_idx, up_cell_idx)
+                        token_to_cell_idx[i] = mapped_cell
+                        # f.write(f"Token {i} (X) -> Cell {mapped_cell}\n")
+            elif token == 'NL':
+                prev_row_start_idx = current_row_start_idx
+                current_row_start_idx = current_cell_idx
+                # f.write(f"Token {i} (NL) -> Row break (next row starts at cell {current_cell_idx})\n")
+            
+        # f.write("\nOverlap Calculations:\n")
+        for bbox_idx, bbox in enumerate(bboxes):
+            # f.write(f"\nChecking Box {bbox_idx}:\n")
+            mapped = False
+            best_overlap = 0
+            best_cell_idx = None
+            
             for cell in cells:
-                if self.bbox_belongs_to_cell(bbox, cell['bbox']):
-                    sequence_pos = cell['sequence_pos']
-                    if sequence_pos < self.config.otsl_max_length:
-                        # span된 셀의 경우 관련된 모든 position을 매핑에 추가
-                        for pos, idx in token_to_cell_idx.items():
-                            if idx == cell_idx:
-                                current_mappings[i].append(pos)
-                    cell_idx += 1
-        
-        # Debug information
-        # print(f"\n=== Box-Tag Mapping Debug ===")
-        # print(f"Number of boxes: {len(bboxes)}")
-        # print(f"Number of cells: {len(cells)}")
-        # print(f"OTSL sequence: {' '.join(otsl_tokens_list)}")
-        # print(f"Token to cell mapping: {token_to_cell_idx}")
-        # for i, mapping in enumerate(current_mappings):
-        #     if mapping:
-        #         print(f"Box {i}: mapped to positions {mapping}")
-        #     else:
-        #         print(f"Box {i}: no mapping")
+                if 'bbox' not in cell:  # bbox가 없는 빈 셀은 건너뛰기
+                    continue
+
+                # f.write(f"  With Cell {cell['cell_idx']}: overlap = {overlap_ratio:.3f}\n")
+                overlap_ratio = self.compute_overlap_ratio(bbox, cell['bbox'])
+                if overlap_ratio > best_overlap:
+                    best_overlap = overlap_ratio
+                    best_cell_idx = cell['cell_idx']
+                    mapped_cell_idx = token_to_cell_idx.get(cell['sequence_pos'], -1)
+                    if 0 <= mapped_cell_idx < len(cells):
+                        mapped = True
+            
+            if mapped and best_overlap > 0.5:
+                current_mappings[best_cell_idx].append(bbox_idx)
+                # f.write(f"  -> Mapped to Cell {best_cell_idx} (overlap: {best_overlap:.3f})\n")
+            # else:
+            #     f.write(f"  -> No valid mapping (best overlap: {best_overlap:.3f} with Cell {best_cell_idx})\n")
+            
+        # f.write("\nFinal Mappings:\n")
+        # for cell_idx, box_indices in current_mappings.items():
+        #     f.write(f"Cell {cell_idx} -> Boxes: {box_indices}\n")
         
         return current_mappings
-
 
     def __len__(self) -> int:
         return len(self.image_names)
