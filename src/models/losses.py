@@ -35,9 +35,45 @@ class TFLOPLoss(nn.Module):
         
         # length 지정
         self.layout_prompt_length = self.config.total_sequence_length - self.config.otsl_max_length
-        
-        
+
+
     def compute_pointer_loss(self, pointer_logits: torch.Tensor, 
+                            box_indices: torch.Tensor, 
+                            data_tag_mask: torch.Tensor,
+                            temperature: float = 0.1) -> torch.Tensor:
+        B, num_boxes, seq_len = pointer_logits.shape
+        
+        # Temperature scaling
+        pointer_logits = pointer_logits / temperature
+        
+        # 1. Get target positions for each box
+        valid_boxes = box_indices != -1
+        valid_box_mask = valid_boxes.any(dim=-1)
+        
+        # 2. Get valid C tag positions (k'∈D)
+        valid_tag_positions = data_tag_mask[:, self.layout_prompt_length:]  # (B, 30)
+        
+        box_losses = torch.zeros_like(valid_box_mask, dtype=torch.float, device=pointer_logits.device)
+        
+        for b in range(B):
+            for j in range(num_boxes):
+                if valid_box_mask[b, j]:
+                    target_positions = box_indices[b, j][valid_boxes[b, j]]
+                    
+                    # 유효한 위치에 대해서만 log_softmax 계산
+                    log_probs = F.log_softmax(pointer_logits[b, j] * valid_tag_positions[b], dim=-1)
+                    
+                    # target positions에 대한 log probability의 평균 계산
+                    box_losses[b, j] = -log_probs[target_positions].mean()
+        
+        # inf나 nan 값 제외
+        valid_losses = box_losses[valid_box_mask & ~torch.isinf(box_losses) & ~torch.isnan(box_losses)]
+        final_loss = valid_losses.mean() if len(valid_losses) > 0 else torch.tensor(0.0, device=pointer_logits.device)
+        
+        return final_loss
+
+        
+    def _compute_pointer_loss(self, pointer_logits: torch.Tensor, 
                             box_indices: torch.Tensor, 
                             data_tag_mask: torch.Tensor,
                             temperature: float = 0.1) -> torch.Tensor:

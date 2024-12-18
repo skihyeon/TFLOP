@@ -40,9 +40,8 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """학습 설정"""
-    exp_name: str = "TFLOP"
-    use_wandb: bool = False
-    gpu_id: int = 2
+    exp_name: str = "TFLOP_base_672_len30_ddp"
+    use_wandb: bool = True
     
     # Resume training
     resume_training: bool = False
@@ -58,29 +57,29 @@ class TrainingConfig:
     num_epochs: int = 200
     checkpoint_dir: str = "./checkpoints"
     
-    batch_size: int = 2 
-    accumulate_grad_batches: int = 16
-    learning_rate: float = 1e-3
+    batch_size: int = 2
+    accumulate_grad_batches: int = 12
+    learning_rate: float = 1e-4
     
     # Device & Hardware
     gpu_id: int = 1  # 기본 GPU ID (단일 GPU 사용시)
     devices: list = None  # 이 부분을 수정
     accelerator: str = "gpu"
-    strategy: str = "ddp"  # multi-GPU 사용시 "ddp"로 설정
+    strategy: str = "ddp_find_unused_parameters_true"  # 미사용 파라미터 감지 활성화
     
     num_workers: int = 12
     pin_memory: bool = True
     
     # Trainer 설정
-    precision: str = "32"
-    gradient_clip_val: float = 0.5
+    precision: str = "16-mixed"
+    gradient_clip_val: float = 1.0
     num_sanity_val_steps: int = 2
     check_val_every_n_epoch: int = 1
     
     def __post_init__(self):
         # devices 설정 수정
         if self.devices is None:
-            self.devices = [0, 1]  # 0번과 1번 GPU만 사용하도록 설정
+            self.devices = [0,1]  # 0번과 1번 GPU만 사용하도록 설정
         
         # accelerator 설정
         if not torch.cuda.is_available():
@@ -99,18 +98,24 @@ class InferenceConfig:
     """추론 관련 설정"""
     
     # 모델 관련
-    checkpoint_path: str = '/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241216_1450_TFLOP_tiny_224_len30_deep_layoutEncoder/checkpoints/TFLOP_tiny_224_len30_deep_layoutEncoder_epoch=44.ckpt'
+    checkpoint_path: str = '/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241217_2341_TFLOP_base_672_len30_ddp/checkpoints/TFLOP_base_672_len30_ddp_epoch=76.ckpt'
     device: str = 'cuda'
     
+    # feature_dim: int = 768      # 모델의 hidden dimension 크기       # 논문 1024
+    # total_sequence_length: int = 512  # 최대 시퀀��(토큰) 길이        # 논문 1376 # bart position embedding최대 길이 1024
+    # otsl_max_length: int = 30
+    # image_size: int = 224  
+    # swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
+    
     feature_dim: int = 768      # 모델의 hidden dimension 크기       # 논문 1024
-    total_sequence_length: int = 512  # 최대 시퀀스(토큰) 길이        # 논문 1376 # bart position embedding최대 길이 1024
+    total_sequence_length: int = 1024  # 최대 시퀀(토큰) 길이        # 논문 1376 # bart position embedding최대 길이 1024
     otsl_max_length: int = 30
-    image_size: int = 224  
-    swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
+    image_size: int = 672  
+    swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
     
     
     image_path: str = './infer_images'
     output_path: str = './infer_result'
     
     batch_size: int = 1
-    num_workers: int = 32
+    num_workers: int = 12

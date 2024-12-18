@@ -48,7 +48,8 @@ class TFLOPLightningModule(pl.LightningModule):
                     batch_size=batch['images'].size(0),
                     on_step=False,
                     on_epoch=True,
-                    prog_bar=True)
+                    prog_bar=True,
+                    sync_dist=True)
         
         
         return loss_dict

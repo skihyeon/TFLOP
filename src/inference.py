@@ -43,6 +43,7 @@ class InferenceDataset(Dataset):
         # Data tag mask 생성
         total_length = self.config.total_sequence_length
         data_tag_mask = torch.zeros(total_length, dtype=torch.bool)
+        empty_tag_mask = torch.zeros(total_length, dtype=torch.bool)
         
         # OCR 결과가 있는 경우에만 data tag mask 설정
         if image_ocr:
@@ -56,7 +57,8 @@ class InferenceDataset(Dataset):
             'image_path': image_path,
             'image': processed_image,
             'ocr_results': image_ocr,
-            'data_tag_mask': data_tag_mask
+            'data_tag_mask': data_tag_mask,
+            'empty_tag_mask': empty_tag_mask
         }
 
 def inference_collate_fn(batch: List[Dict]) -> Dict[str, Any]:
@@ -65,7 +67,8 @@ def inference_collate_fn(batch: List[Dict]) -> Dict[str, Any]:
         'image_paths': [item['image_path'] for item in batch],
         'images': torch.cat([item['image']['pixel_values'] for item in batch], dim=0),
         'ocr_results': [item['ocr_results'] for item in batch],
-        'data_tag_mask': torch.stack([item['data_tag_mask'] for item in batch])
+        'data_tag_mask': torch.stack([item['data_tag_mask'] for item in batch]),
+        'empty_tag_mask': torch.stack([item['empty_tag_mask'] for item in batch])
     }
 
 def create_inference_dataloader(
@@ -134,6 +137,7 @@ class TFLOPInferenceLightningModule(pl.LightningModule):
         images = batch['images']
         ocr_results = batch['ocr_results']
         data_tag_mask = batch['data_tag_mask']
+        empty_tag_mask = batch['empty_tag_mask']
         batch_size = len(images)
 
         # OCR 결과 처리
@@ -161,7 +165,8 @@ class TFLOPInferenceLightningModule(pl.LightningModule):
         outputs = self.model({
             'images': images,
             'bboxes': padded_bboxes,
-            'data_tag_mask': data_tag_mask.to(self.device)
+            'data_tag_mask': data_tag_mask.to(self.device),
+            'empty_tag_mask': empty_tag_mask.to(self.device)
         })
 
         # 결과 처리

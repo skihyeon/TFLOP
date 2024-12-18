@@ -249,14 +249,12 @@ class TFLOP(nn.Module):
         
         # 3. Enhance visual features with layout information
         enhanced_visual_features = self.enhance_visual_features(visual_features, layout_prompt)
-        
         # 4. Prepare cross-attention mask
         cross_attn_mask = self.prepare_cross_attention_mask(enhanced_visual_features, layout_prompt)
-
+        
         if self.training:
             labels = batch['token_ids']     
             attention_mask = batch['attention_mask']   # (B, total_sequence_length)
-            
             
             decoder_input_ids = shift_tokens_right(
                 labels,
@@ -270,16 +268,20 @@ class TFLOP(nn.Module):
                 token_embeds
             ], dim=1)
             
+            # 1. Padding mask 생성
+            padding_mask = torch.ones_like(attention_mask)
+            padding_mask[:, layout_prompt.size(1):] = (decoder_input_ids != self.tokenizer.pad_token_id)
+            
             decoder_outputs = self.bart.decoder(
                 inputs_embeds=prompt_inputs,
-                attention_mask=attention_mask,
-                encoder_hidden_states=enhanced_visual_features,  # 강화된 visual features 사용
-                encoder_attention_mask=cross_attn_mask,  # 구조적 cross-attention mask 사용
+                attention_mask=padding_mask,  # padding mask만 전달
+                encoder_hidden_states=enhanced_visual_features,
+                # encoder_attention_mask=cross_attn_mask,
                 use_cache=False,
                 output_hidden_states=True,
                 return_dict=True
             )
-
+        
         else :
             # 초기 BOS 토큰으로 시작
             curr_ids = torch.full(
@@ -301,8 +303,8 @@ class TFLOP(nn.Module):
                 # - layout prompt 부분은 모두 True
                 # - 현재까지 생성된 토큰들은 True
                 # - 아직 생성되지 않은 부분은 False
-                attention_mask = torch.zeros(
-                    (B, prompt_length + max_length),
+                attention_mask = torch.ones(
+                    (B, prompt_length + curr_length),
                     dtype=torch.bool,
                     device=images.device
                 )
@@ -314,9 +316,9 @@ class TFLOP(nn.Module):
                 
                 decoder_outputs = self.bart.decoder(
                     inputs_embeds=prompt_inputs,
-                    attention_mask=attention_mask[:, :prompt_length + curr_length],
+                    attention_mask=attention_mask,
                     encoder_hidden_states=enhanced_visual_features,
-                    encoder_attention_mask=cross_attn_mask,
+                    # encoder_attention_mask=cross_attn_mask,
                     use_cache=True,
                     output_hidden_states=True,
                     return_dict=True
@@ -358,12 +360,13 @@ class TFLOP(nn.Module):
         logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]  
 
         tag_logits = self.output_projection(logical_structure_embeddings)
-
+        
         pointer_logits, empty_pointer_logits = self.layout_pointer(
             box_features=bbox_embeddings,
             tag_features=logical_structure_embeddings,
-            data_tag_mask = data_tag_mask,
+            data_tag_mask=data_tag_mask,
         )
+    
 
         row_sim_matrix, col_sim_matrix = None, None
         row_span_coef, col_span_coef = None, None
