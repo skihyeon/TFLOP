@@ -435,7 +435,7 @@ def construct_table_html_pred(
         current_span[1] = max(current_span[1], col - origin_col + 1)
 
     # 6. pointer_logits를 사용하여 text_cells 매핑 생성
-    text_cells = {}  # (row, col) -> (box_idx, text) 매핑
+    text_cells = {}  # (row, col) -> List[(box_idx, text, prob)]
     pointer_probs = torch.softmax(pointer_logits, dim=1)
     
     for box_idx in range(pointer_probs.size(0)):
@@ -447,12 +447,9 @@ def construct_table_html_pred(
                 if row != -1:  # NL 태그가 아닌 경우
                     if box_idx in bbox_with_text:
                         text = bbox_with_text[box_idx]['text']
-                        if (row, col) in text_cells:
-                            existing_prob = pointer_probs[text_cells[(row, col)][0], cell_idx].item()
-                            if max_prob.item() > existing_prob:
-                                text_cells[(row, col)] = (box_idx, text)
-                        else:
-                            text_cells[(row, col)] = (box_idx, text)
+                        if (row, col) not in text_cells:
+                            text_cells[(row, col)] = []
+                        text_cells[(row, col)].append((box_idx, text, max_prob.item()))
 
     # 7. HTML 테이블 생성
     html = ["<table>"]
@@ -476,8 +473,13 @@ def construct_table_html_pred(
                 cell_tag += ">"
                 
                 if (i, j) in text_cells:
-                    box_idx, text = text_cells[(i, j)]
-                    html.append(f"{cell_tag}{text}</td>")
+                    # 해당 셀의 모든 box 처리
+                    boxes = text_cells[(i, j)]
+                    # 확률 순으로 정렬
+                    boxes.sort(key=lambda x: x[2], reverse=True)
+                    # 모든 텍스트 결합 (공백으로 구분)
+                    combined_text = ' '.join(text for _, text, _ in boxes)
+                    html.append(f"{cell_tag}{combined_text}</td>")
                 else:
                     html.append(f"{cell_tag}</td>")
                 
