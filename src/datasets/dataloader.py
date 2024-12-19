@@ -3,7 +3,6 @@ import torch
 from torch.utils.data import DataLoader
 from .dataset import TableDataset
 from models.otsl_tokenizer import OTSLTokenizer
-from .sampler import OTSLLengthBatchSampler
 from config import ModelConfig
 
 def collate_fn(batch, tokenizer):
@@ -125,3 +124,41 @@ def create_dataloader(
             pin_memory=pin_memory,
             drop_last=drop_last
         )
+
+def predict_collate_fn(batch: List[Dict]) -> Dict:
+    batch_size = len(batch)
+    config = ModelConfig()
+    layout_prompt_length = config.total_sequence_length - config.otsl_max_length
+    
+    # 1. 이미지 처리
+    images = torch.stack([item['images'] for item in batch])
+    
+    # 2. bbox 처리 (layout_prompt_length만큼 패딩)
+    bboxes = torch.zeros((batch_size, layout_prompt_length, 4))
+    for i, item in enumerate(batch):
+        if item['num_boxes'] > 0:
+            bboxes[i, :item['num_boxes']] = item['bboxes']
+    
+    return {
+        'image_names': [item['image_name'] for item in batch],
+        'images': images,
+        'bboxes': bboxes,  # collate_fn에서 패딩
+        'bbox_with_text': [item['bbox_with_text'] for item in batch],
+        'num_boxes': torch.tensor([item['num_boxes'] for item in batch])
+    }
+
+def create_predict_dataloader(
+    dataset: TableDataset,
+    batch_size: int = 1,
+    num_workers: int = 4,
+    pin_memory: bool = True
+) -> DataLoader:
+    """Predict용 DataLoader 생성"""
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        collate_fn=predict_collate_fn
+    )

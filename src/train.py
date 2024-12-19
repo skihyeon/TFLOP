@@ -106,11 +106,8 @@ def main():
 
     if train_config.resume_training and train_config.resume_checkpoint_path:
         print(f"Resuming training from checkpoint: {train_config.resume_checkpoint_path}")
-        # optimizer 상태를 제외하고 모델 가중치만 로드
-        state_dict = torch.load(train_config.resume_checkpoint_path)
-        model.load_state_dict(state_dict['state_dict'])
+        # 체크포인트는 trainer.fit에서만 로딩
         trainer.fit(model, datamodule=datamodule, ckpt_path=train_config.resume_checkpoint_path)
-        # trainer.fit(model, datamodule=datamodule)
     else:
         trainer.fit(model, datamodule=datamodule)
 

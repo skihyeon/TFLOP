@@ -291,48 +291,61 @@ def construct_table_html_gt(html_data: Dict) -> str:
     try:
         html = ["<table>"]
         current_cell_idx = 0
-        in_row = False
         
-        # HTML 태그를 제거하는 함수
         def clean_text(tokens: List[str]) -> str:
             text = ''.join(tokens)
-            # HTML 태그 제거
-            text = text.replace('<b>', '').replace('</b>', '')
-            text = text.replace('<i>', '').replace('</i>', '')
-            text = text.replace('<sup>', '').replace('</sup>', '')
-            text = text.replace('<sub>', '').replace('</sub>', '')
-            return text
+            for tag in ['<b>', '</b>', '<i>', '</i>', '<sup>', '</sup>', '<sub>', '</sub>']:
+                text = text.replace(tag, '')
+            return text.strip()
         
-        for token in html_data['structure']['tokens']:
+        structure_tokens = html_data['structure']['tokens']
+        cells = html_data['cells']
+        i = 0
+        
+        while i < len(structure_tokens):
+            token = structure_tokens[i]
+            
+            if token in ['<thead>', '</thead>', '<tbody>', '</tbody>']:
+                i += 1
+                continue
+                
             if token == '<tr>':
                 html.append("<tr>")
-                in_row = True
-            elif token == '</tr>':
+                i += 1
+                continue
+                
+            if token == '</tr>':
                 html.append("</tr>")
-                in_row = False
-            elif token == '</thead>' or token == '</tbody>':
+                i += 1
                 continue
-            elif token == '<thead>' or token == '<tbody>':
-                continue
-            elif '<td' in token:
+            
+            if token == '<td' or token == '<td>':
                 cell_tag = "<td"
-                if 'rowspan=' in token:
-                    rowspan = token.split('rowspan="')[1].split('"')[0]
-                    cell_tag += f' rowspan="{rowspan}"'
-                if 'colspan=' in token:
-                    colspan = token.split('colspan="')[1].split('"')[0]
-                    cell_tag += f' colspan="{colspan}"'
+                
+                # 현재 토큰이 '<td'인 경우 속성 확인
+                if token == '<td':
+                    i += 1
+                    while i < len(structure_tokens) and structure_tokens[i] != '>':
+                        attr = structure_tokens[i]
+                        if 'rowspan="' in attr:
+                            rowspan = attr.split('rowspan="')[1].split('"')[0]
+                            cell_tag += f' rowspan="{rowspan}"'
+                        elif 'colspan="' in attr:
+                            colspan = attr.split('colspan="')[1].split('"')[0]
+                            cell_tag += f' colspan="{colspan}"'
+                        i += 1
+                
                 cell_tag += ">"
                 
-                # 셀 내용 추가 (HTML 태그 제거)
-                if current_cell_idx < len(html_data['cells']):
-                    cell_content = clean_text(html_data['cells'][current_cell_idx]['tokens'])
+                # 셀 내용 추가
+                if current_cell_idx < len(cells):
+                    cell_content = clean_text(cells[current_cell_idx]['tokens'])
                     html.append(f"{cell_tag}{cell_content}</td>")
                     current_cell_idx += 1
                 else:
                     html.append(f"{cell_tag}</td>")
-            elif token == '</td>':
-                continue
+            
+            i += 1
         
         html.append("</table>")
         return '\n'.join(html)
@@ -348,13 +361,12 @@ def construct_table_html_pred(
     confidence_threshold: float = 0.5
 ) -> str:
     """OTSL과 pointer logits를 사용하여 예측 테이블 생성"""
-    # try:
     # 1. OTSL 토큰을 그리드로 변환
     tokens = [t for t in otsl_sequence.split() if t not in ['[BOS]', '[EOS]', '[PAD]', '[UNK]']]
     grid = []
     current_row = []
     
-    # 2. 토큰 인덱스와 그리드 위치 매핑 (모든 태그 포함)
+    # 2. 토큰 인덱스와 그리드 위치 매핑
     token_positions = {}  # token_idx -> (row, col) 매핑
     token_idx = 0
     current_row_idx = 0
@@ -423,37 +435,24 @@ def construct_table_html_pred(
         current_span[1] = max(current_span[1], col - origin_col + 1)
 
     # 6. pointer_logits를 사용하여 text_cells 매핑 생성
-    text_cells = {}  # (row, col) -> text_idx 매핑
+    text_cells = {}  # (row, col) -> (box_idx, text) 매핑
     pointer_probs = torch.softmax(pointer_logits, dim=1)
     
-    
-    # 디버깅을 위한 출력 추가
-    # print("\nPointer Probabilities:")
     for box_idx in range(pointer_probs.size(0)):
         max_prob, cell_idx = pointer_probs[box_idx].max(dim=0)
-        # print(f"Box {box_idx}: max_prob={max_prob:.4f}, cell_idx={cell_idx}")
         if max_prob.item() >= confidence_threshold and cell_idx < len(token_positions):
             token_idx = cell_idx.item()
             if token_idx in token_positions:
                 row, col = token_positions[token_idx]
-                if row != -1:
-                    # 이미 해당 위치에 텍스트가 있는 경우 확률 비교
-                    if (row, col) in text_cells:
-                        existing_box_idx = text_cells[(row, col)]
-                        existing_prob = pointer_probs[existing_box_idx, cell_idx].item()
-                        if max_prob.item() > existing_prob:
-                            text_cells[(row, col)] = box_idx
-                    else:
-                        text_cells[(row, col)] = box_idx
-                    # print(f"Mapped to position ({row}, {col})")
-
-    # print("\nGrid Structure:")
-    # for i, row in enumerate(grid):
-    #     print(f"Row {i}: {row}")
-
-    # print("\nText Mappings:")
-    # for (row, col), box_idx in text_cells.items():
-    #     print(f"Position ({row}, {col}) -> Text: {bbox_with_text[box_idx].get('text', '')}")
+                if row != -1:  # NL 태그가 아닌 경우
+                    if box_idx in bbox_with_text:
+                        text = bbox_with_text[box_idx]['text']
+                        if (row, col) in text_cells:
+                            existing_prob = pointer_probs[text_cells[(row, col)][0], cell_idx].item()
+                            if max_prob.item() > existing_prob:
+                                text_cells[(row, col)] = (box_idx, text)
+                        else:
+                            text_cells[(row, col)] = (box_idx, text)
 
     # 7. HTML 테이블 생성
     html = ["<table>"]
@@ -477,8 +476,7 @@ def construct_table_html_pred(
                 cell_tag += ">"
                 
                 if (i, j) in text_cells:
-                    text_idx = text_cells[(i, j)]
-                    text = bbox_with_text[text_idx].get('text', '').strip()
+                    box_idx, text = text_cells[(i, j)]
                     html.append(f"{cell_tag}{text}</td>")
                 else:
                     html.append(f"{cell_tag}</td>")
@@ -491,10 +489,6 @@ def construct_table_html_pred(
     
     html.append("</table>")
     return '\n'.join(html)
-        
-    # except Exception as e:
-    #     print(f"Error constructing pred HTML: {str(e)}")
-    #     return f"<table><tr><td>Error: {str(e)}</td></tr></table>"
 
 def extract_spans_from_otsl(otsl_tokens: List[int], tokenizer: OTSLTokenizer) -> Tuple[np.ndarray, np.ndarray]:
     """OTSL 토큰에서 span matrix 추출"""

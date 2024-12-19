@@ -4,20 +4,19 @@ sys.path.append(os.path.dirname(os.path.abspath(os.path.dirname(__file__))))
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-import torchvision.transforms as transforms
 from models.otsl_tokenizer import OTSLTokenizer
 from typing import Dict, Optional, Any
 import jsonlines
-from utils.util import extract_spans_from_html, convert_html_to_otsl, extract_spans_from_otsl, compute_span_coefficients
-import numpy as np
+from utils.util import convert_html_to_otsl
 from transformers import AutoImageProcessor
 from config import ModelConfig
+from pathlib import Path
 
 # 디버그 모드 설정
 DEBUG = True
 DEBUG_SAMPLES = {
-    'train': 1280,
-    'val': 64
+    'train': 2800,
+    'val': 112
 }
 
 class TableDataset(Dataset):
@@ -34,12 +33,17 @@ class TableDataset(Dataset):
         data_dir: str,
         split: str = 'train',
         image_size: int = 768,       # 논문 4.2,
-        tokenizer: OTSLTokenizer = None
+        tokenizer: OTSLTokenizer = None,
+        is_predict: bool = False,  # predict 모드 플래그
+        ocr_results: Optional[Dict] = None  # OCR 결과 (predict 모드용)
     ):
         super().__init__()
         self.data_dir = data_dir
         self.split = split
         self.image_size = image_size
+        self.tokenizer = tokenizer
+        self.is_predict = is_predict
+        self.ocr_results = ocr_results
         self.config = ModelConfig()
         # 고정된 길이 설정
         self.layout_prompt_length = self.config.total_sequence_length - self.config.otsl_max_length
@@ -47,9 +51,14 @@ class TableDataset(Dataset):
         self.image_processor = AutoImageProcessor.from_pretrained(ModelConfig.swin_model_name)
         self.image_processor.size = (image_size, image_size)
         
-        # 주석 파일 로드 및 필터링
-        self._load_and_filter_annotations()
-        
+        # predict 모드가 아닐 때만 annotation 로드
+        if not is_predict:
+            self._load_and_filter_annotations()
+        else:
+            # predict 모드일 때는 이미지 경로만 수집
+            self.image_paths = list(Path(data_dir).glob("*.[jp][pn][g]"))
+            self.image_names = [path.name for path in self.image_paths] 
+    
     def _load_and_filter_annotations(self):
         """주석 파일 로드 및 sequence length 기준으로 필터링"""
         ann_file = os.path.join(self.data_dir, f'{self.split}_filtered.jsonl')
@@ -120,80 +129,119 @@ class TableDataset(Dataset):
             print(f"  {token:<7}: {count:>4}")
             
     def __getitem__(self, idx: int) -> Dict[str, Any]:
-        image_name = self.image_names[idx]
-        ann = self.annotations[image_name]
-        
-        # 이미지 로드 및 전처리
-        image_path = os.path.join(self.data_dir, self.split, image_name)
-        if not os.path.exists(image_path):
-            raise ValueError(f"Image file not found: {image_path}")
-        
-        image = Image.open(image_path).convert('RGB')
-        image_width, image_height = image.size
-        image = self.image_processor(image, return_tensors="pt")
-        
-        # C 태그 위치 추적
-        token_positions = [j for j, token in enumerate(ann['otsl_tokens_list']) if token == 'C']
-        
-        # cells, bboxes, text 정보 한번에 처리
-        cells = []
-        bboxes = []
-        bbox_with_text = {}
-        cell_idx = 0
-        
-        for pos in token_positions:
-            if cell_idx >= len(ann['html']['cells']):
-                break
-                
-            cell = ann['html']['cells'][cell_idx]
-            cell_info = {'sequence_pos': pos, 'cell_idx': cell_idx}
+        if self.is_predict:
+            # predict 모드
+            image_path = self.image_paths[idx]
+            image_name = image_path.name
             
-            if 'bbox' in cell:
-                x0, y0, x1, y1 = cell['bbox']
-                normalized_bbox = [x0/image_width, y0/image_height, 
-                                x1/image_width, y1/image_height]
-                cell_info.update({
-                    'bbox': normalized_bbox,
-                    'has_data': True
-                })
-                bboxes.append(normalized_bbox)
-                
-                tokens = cell.get('tokens', [])
-                bbox_with_text[cell_idx] = {
-                    'bbox': cell['bbox'],
-                    'text': self.tokens_to_text(tokens) if tokens else ""
-                }
-            else:
-                cell_info['has_data'] = False
+            # 1. 이미지 로드 및 전처리
+            image = Image.open(image_path).convert('RGB')
+            image_width, image_height = image.size
+            image_dict = self.image_processor(image, return_tensors="pt")
+            image = image_dict.pixel_values.squeeze(0)
             
-            cells.append(cell_info)
-            cell_idx += 1
+            # 2. OCR 결과 처리 (있는 경우)
+            boxes = []
+            bbox_with_text = {}
+            
+            if self.ocr_results and image_name in self.ocr_results:
+                for i, item in enumerate(self.ocr_results[image_name]):
+                    # bbox 정규화
+                    x0, y0, x1, y1 = item['bbox']
+                    normalized_bbox = [
+                        x0/image_width, y0/image_height,
+                        x1/image_width, y1/image_height
+                    ]
+                    boxes.append(normalized_bbox)
+                    bbox_with_text[i] = {
+                        'bbox': normalized_bbox,
+                        'text': item['text']
+                    }
+            
+            # 3. 기본 필드만 반환
+            return {
+                'image_name': image_name,
+                'images': image,
+                'bboxes': torch.FloatTensor(boxes) if boxes else torch.zeros((0, 4)),
+                'bbox_with_text': bbox_with_text,
+                'num_boxes': len(boxes)
+            }
         
-        if not cells:
-            raise ValueError(f"No valid cells found in {image_name}")
-        
-        # box-tag 매핑 생성 및 보정
-        current_mappings = self._create_box_tag_mappings(bboxes, cells, ann['otsl_tokens_list'])
-        unmapped_boxes = set(range(len(bboxes))) - {idx for mappings in current_mappings.values() for idx in mappings}
-        
-        if unmapped_boxes:
-            default_cell = next(cell for cell in cells if 'bbox' in cell)
-            for bbox_idx in unmapped_boxes:
-                current_mappings[default_cell['cell_idx']].append(bbox_idx)
-                print(f"Warning: Sample {idx}, Box {bbox_idx} mapped to default cell {default_cell['cell_idx']}")
-        
-        return {
-            'image_name': image_name,
-            'image': image,
-            'otsl_tokens_list': ann['otsl_tokens_list'],
-            'bboxes': bboxes,
-            'num_boxes': len(bboxes),
-            'cells': cells,
-            'html': ann['html'],
-            'box_mappings': current_mappings,
-            'token_positions': token_positions,
-            'bbox_with_text': bbox_with_text
-        }
+        else:
+            image_name = self.image_names[idx]
+            ann = self.annotations[image_name]
+            
+            # 이미지 로드 및 전처리
+            image_path = os.path.join(self.data_dir, self.split, image_name)
+            if not os.path.exists(image_path):
+                raise ValueError(f"Image file not found: {image_path}")
+            
+            image = Image.open(image_path).convert('RGB')
+            image_width, image_height = image.size
+            image = self.image_processor(image, return_tensors="pt")
+            
+            # C 태그 위치 추적
+            token_positions = [j for j, token in enumerate(ann['otsl_tokens_list']) if token == 'C']
+            
+            # cells, bboxes, text 정보 한번에 처리
+            cells = []
+            bboxes = []
+            bbox_with_text = {}
+            cell_idx = 0
+            
+            for pos in token_positions:
+                if cell_idx >= len(ann['html']['cells']):
+                    break
+                    
+                cell = ann['html']['cells'][cell_idx]
+                cell_info = {'sequence_pos': pos, 'cell_idx': cell_idx}
+                
+                if 'bbox' in cell:
+                    x0, y0, x1, y1 = cell['bbox']
+                    normalized_bbox = [x0/image_width, y0/image_height, 
+                                    x1/image_width, y1/image_height]
+                    cell_info.update({
+                        'bbox': normalized_bbox,
+                        'has_data': True
+                    })
+                    bboxes.append(normalized_bbox)
+                    
+                    tokens = cell.get('tokens', [])
+                    bbox_with_text[cell_idx] = {
+                        'bbox': cell['bbox'],
+                        'text': self.tokens_to_text(tokens) if tokens else ""
+                    }
+                else:
+                    cell_info['has_data'] = False
+                
+                cells.append(cell_info)
+                cell_idx += 1
+            
+            if not cells:
+                raise ValueError(f"No valid cells found in {image_name}")
+            
+            # box-tag 매핑 생성 및 보정
+            current_mappings = self._create_box_tag_mappings(bboxes, cells, ann['otsl_tokens_list'])
+            unmapped_boxes = set(range(len(bboxes))) - {idx for mappings in current_mappings.values() for idx in mappings}
+            
+            if unmapped_boxes:
+                default_cell = next(cell for cell in cells if 'bbox' in cell)
+                for bbox_idx in unmapped_boxes:
+                    current_mappings[default_cell['cell_idx']].append(bbox_idx)
+                    print(f"Warning: Sample {idx}, Box {bbox_idx} mapped to default cell {default_cell['cell_idx']}")
+            
+            return {
+                'image_name': image_name,
+                'image': image,
+                'otsl_tokens_list': ann['otsl_tokens_list'],
+                'bboxes': bboxes,
+                'num_boxes': len(bboxes),
+                'cells': cells,
+                'html': ann['html'],
+                'box_mappings': current_mappings,
+                'token_positions': token_positions,
+                'bbox_with_text': bbox_with_text
+            }
 
     def compute_overlap_ratio(self, bbox1, bbox2):
         """두 bbox 간의 겹침 비율 계산"""
@@ -332,5 +380,6 @@ class TableDataset(Dataset):
         return current_mappings
 
     def __len__(self) -> int:
-        return len(self.image_names)
-    
+        if self.is_predict:
+            return len(self.image_paths)  # predict 모드에서는 모든 이미지 처리
+        return len(self.annotations)

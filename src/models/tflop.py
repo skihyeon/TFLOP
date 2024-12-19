@@ -232,8 +232,6 @@ class TFLOP(nn.Module):
         """
         images = batch['images']           
         text_regions = batch['bboxes']  
-        data_tag_mask = batch['data_tag_mask']  # non-empty C 태그
-        empty_tag_mask = batch['empty_tag_mask']  # empty C 태그
         
         B = len(images)
         
@@ -279,7 +277,10 @@ class TFLOP(nn.Module):
                 return_dict=True
             )
         
-        else :
+        else:
+            # print("!"*100)
+            # print("[디버깅] 추론 모드 시작")
+            
             # 초기 BOS 토큰으로 시작
             curr_ids = torch.full(
                 (B, 1),
@@ -287,29 +288,36 @@ class TFLOP(nn.Module):
                 dtype=torch.long,
                 device=images.device
             )
+            # print(f"[디버깅] 초기 BOS 토큰 ID: {curr_ids}")
+            
             max_length = self.tokenizer.otsl_sequence_length
+            # print(f"[디버깅] 최대 생성 길이: {max_length}")
             
             # Layout prompt의 길이
             prompt_length = layout_prompt.size(1)
+            # print(f"[디버깅] Layout prompt 길이: {prompt_length}")
             
             for step in range(max_length-1):
+                # print(f"\n[디버깅] Step {step} 시작")
+                
                 # 현재까지의 시퀀스 길이
                 curr_length = curr_ids.size(1)
+                # print(f"[디버깅] 현재 시퀀스 길이: {curr_length}")
+                # print(f"[디버깅] 현재까지 생성된 토큰: {[self.tokenizer.id2token[id.item()] for id in curr_ids[0]]}")
                 
-                # Attention mask 생성:
-                # - layout prompt 부분은 모두 True
-                # - 현재까지 생성된 토큰들은 True
-                # - 아직 생성되지 않은 부분은 False
+                # Attention mask 생성
                 attention_mask = torch.ones(
                     (B, prompt_length + curr_length),
                     dtype=torch.bool,
                     device=images.device
                 )
-                attention_mask[:, :prompt_length] = True  # layout prompt 부분
-                attention_mask[:, prompt_length:prompt_length + curr_length] = True  # 생성된 토큰들
+                attention_mask[:, :prompt_length] = True
+                attention_mask[:, prompt_length:prompt_length + curr_length] = True
+                # print(f"[디버깅] Attention mask 크기: {attention_mask.shape}")
                 
                 token_embeds = self.bart.decoder.embed_tokens(curr_ids)
                 prompt_inputs = torch.cat([layout_prompt, token_embeds], dim=1)
+                # print(f"[디버깅] Decoder 입력 임베딩 크기: {prompt_inputs.shape}")
                 
                 decoder_outputs = self.bart.decoder(
                     inputs_embeds=prompt_inputs,
@@ -322,9 +330,23 @@ class TFLOP(nn.Module):
                 
                 last_hidden_state = decoder_outputs.last_hidden_state
                 logits = self.output_projection(last_hidden_state[:, -1:])
+                # print(f"[디버깅] 로짓 크기: {logits.shape}")
+                
+                # Top-5 토큰 확률 출력
+                probs = F.softmax(logits.squeeze(1), dim=-1)
+                top5_probs, top5_indices = probs.topk(5)
+                # print("\n[디버깅] Top-5 예측 토큰:")
+                # for prob, idx in zip(top5_probs[0], top5_indices[0]):
+                    # token = self.tokenizer.id2token[idx.item()]
+                    # print(f"  {token}: {prob.item():.4f}")
+                
                 next_token = torch.argmax(logits.squeeze(1), dim=-1, keepdim=True)
+                # print(f"[디버깅] 선택된 다음 토큰: {self.tokenizer.id2token[next_token[0].item()]}")
+                
                 curr_ids = torch.cat([curr_ids, next_token], dim=1)
             
+            # print("\n[디버깅] 최종 생성된 시퀀스:")
+            # print([self.tokenizer.id2token[id.item()] for id in curr_ids[0]])
             # training과 동일한 입력 형태 구성
             decoder_input_ids = curr_ids
             token_embeds = self.bart.decoder.embed_tokens(decoder_input_ids)

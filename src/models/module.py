@@ -55,9 +55,6 @@ class TFLOPLightningModule(pl.LightningModule):
         return loss_dict
         
     def validation_step(self, batch, batch_idx):
-        # Validation에서는 teacher forcing 사용하지 않음
-        batch['teacher_forcing_ratio'] = 0.0
-        
         outputs = self(batch)
         loss_dict = self.criterion(batch, outputs)
         batch_size = batch['images'].size(0)
@@ -98,7 +95,7 @@ class TFLOPLightningModule(pl.LightningModule):
                     pred_html = construct_table_html_pred(
                         pred_otsl,
                         bbox_with_text,
-                        outputs['pointer_logits'][i]
+                        outputs['pointer_logits'][i] / self.model.config.temperature
                     )
                     true_html = construct_table_html_gt(batch['html'][i])
                     
@@ -194,3 +191,86 @@ class TFLOPLightningModule(pl.LightningModule):
                 "frequency": 1
             }
         }
+        
+    def test_step(self, batch, batch_idx):
+        self.model.train(False)
+        outputs = self(batch)
+        loss_dict = self.criterion(batch, outputs)
+        batch_size = batch['images'].size(0)
+        
+        # Loss logging
+        loss_order = ['loss', 'cls_loss', 'ptr_loss', 'empty_ptr_loss']
+        # for name in loss_order:
+        #     if name in loss_dict:
+        #         self.log(f"test/{name}", loss_dict[name],
+        #                 batch_size=batch_size,
+        #                 on_step=False,
+        #                 on_epoch=True,
+        #                 sync_dist=True)
+        
+        # TEDS 계산
+        for i in range(batch_size):
+            pred_tokens = outputs['tag_logits'][i].argmax(dim=-1)
+            pred_tokens = pred_tokens[pred_tokens != self.model.tokenizer.pad_token_id]
+            pred_otsl = self.model.tokenizer.decode(pred_tokens.cpu().tolist())
+            
+            try:
+                pred_html = construct_table_html_pred(
+                    pred_otsl,
+                    batch['bbox_with_text'][i],
+                    outputs['pointer_logits'][i] / self.model.config.temperature
+                )
+                true_html = construct_table_html_gt(batch['html'][i])
+                
+                teds = compute_teds(pred_html, true_html)
+                teds_struct = compute_teds_struct(pred_html, true_html)
+                
+                self.log("test/teds", teds, 
+                        on_epoch=True, 
+                        batch_size=batch_size,
+                        sync_dist=True)
+                self.log("test/teds_struct", teds_struct, 
+                        on_epoch=True, 
+                        batch_size=batch_size,
+                        sync_dist=True)
+                
+            except Exception as e:
+                print(f"Error in test_step: {str(e)}")
+        
+        return loss_dict
+    
+    def predict_step(self, batch, batch_idx):
+        self.model.train(False)
+        outputs = self(batch)
+        batch_size = batch['images'].size(0)
+        predictions = []
+
+        for i in range(batch_size):
+            # 1. OTSL 시퀀스 생성
+            pred_tokens = outputs['tag_logits'][i].argmax(dim=-1)
+        
+            pred_otsl = self.model.tokenizer.decode(pred_tokens.cpu().tolist()) ## 어차피 decode 시 특수 토큰들은 제거됨
+            
+            # 2. HTML 생성
+            try:
+                pointer_logits = outputs['pointer_logits'][i] / self.model.config.temperature
+                pred_html = construct_table_html_pred(
+                    pred_otsl,
+                    batch['bbox_with_text'][i],
+                    pointer_logits,
+                    confidence_threshold=0.2
+                )
+                print(f"pred_otsl: {pred_otsl}")
+        
+            except Exception as e:
+                print(f"Error constructing HTML for {batch['image_names'][i]}: {str(e)}")
+                pred_html = "<table><tr><td>Error occurred</td></tr></table>"
+            
+            predictions.append({
+                'image_name': batch['image_names'][i],
+                'pred_html': pred_html,
+                'pred_otsl': pred_otsl,
+                'pointer_logits': pointer_logits.cpu().numpy() if pointer_logits is not None else None
+            })
+        
+        return predictions
