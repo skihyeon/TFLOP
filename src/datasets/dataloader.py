@@ -78,7 +78,6 @@ def collate_fn(batch, tokenizer):
         'token_ids': token_ids_list,          # (B, otsl_max_length)
         'bboxes': padded_bboxes,              # (B, layout_prompt_length, 4)
         'box_indices': box_indices,           # (B, layout_prompt_length, max_mappings)
-        'attention_mask': attention_mask,      # (B, total_length)
         'data_tag_mask': data_tag_mask,       # (B, total_length) - 데이터 있는 C 태그
         'empty_tag_mask': empty_tag_mask,     # (B, total_length) - 데이터 없는 C 태그
         'num_boxes': num_boxes,               # (B)
@@ -96,34 +95,18 @@ def create_dataloader(
     shuffle: bool = True,
     num_workers: int = 4,
     pin_memory: bool = True,
-    use_length_sampler: bool = False,
     drop_last: bool = False
 ) -> DataLoader:
     """데이터로더 생성"""
-    if use_length_sampler:
-        batch_sampler = OTSLLengthBatchSampler(
-            dataset=dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            drop_last=drop_last
-        )
-        return DataLoader(
-            dataset,
-            batch_sampler=batch_sampler,
-            num_workers=num_workers,
-            collate_fn=lambda batch: collate_fn(batch, tokenizer),
-            pin_memory=pin_memory
-        )
-    else:
-        return DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
-            num_workers=num_workers,
-            collate_fn=lambda batch: collate_fn(batch, tokenizer),
-            pin_memory=pin_memory,
-            drop_last=drop_last
-        )
+    return DataLoader(
+        dataset,
+        batch_size=batch_size,
+        shuffle=shuffle,
+        num_workers=num_workers,
+        collate_fn=lambda batch: collate_fn(batch, tokenizer),
+        pin_memory=pin_memory,
+        drop_last=drop_last
+    )
 
 def predict_collate_fn(batch: List[Dict]) -> Dict:
     batch_size = len(batch)

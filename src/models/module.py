@@ -12,15 +12,13 @@ from pathlib import Path
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 class TFLOPLightningModule(pl.LightningModule):
-    def __init__(self, model_config: Any, train_config: Any, inference_mode: bool = False):
+    def __init__(self, model_config: Any, train_config: Any):
         super().__init__()
         self.save_hyperparameters()
         self.model_config = model_config
         self.train_config = train_config
-        self.inference_mode = inference_mode
-
         # Model components
-        self.model = TFLOP(model_config, inference_mode)
+        self.model = TFLOP(model_config)
         self.criterion = TFLOPLoss(
             lambda_cls=model_config.lambda_cls,
             lambda_ptr=model_config.lambda_ptr,
@@ -186,7 +184,7 @@ class TFLOPLightningModule(pl.LightningModule):
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "val/loss",  # validation loss 기준
+                "monitor": "train/loss",  # validation loss 기준
                 "interval": "epoch",    # epoch 단위로 업데이트
                 "frequency": 1
             }

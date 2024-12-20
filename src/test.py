@@ -47,7 +47,6 @@ def main():
         train_config.resume_checkpoint_path,
         model_config=model_config,
         train_config=train_config,
-        inference_mode=True
     )
     model.to(torch.device(f'cuda:{train_config.gpu_id}'))
     

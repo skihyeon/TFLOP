@@ -4,8 +4,6 @@ from datetime import datetime
 from typing import Dict, Tuple, List, Union, Optional
 import numpy as np
 import torch
-import json
-import itertools
 from models.otsl_tokenizer import OTSLTokenizer
 
 def init_wandb(model_config, train_config):
@@ -111,17 +109,6 @@ def extract_spans_from_html(html_structure: Dict) -> Tuple[List[Dict], np.ndarra
     return processed_cells, row_span_matrix, col_span_matrix
 
 def convert_html_to_otsl(ann: Dict) -> Tuple[List[str], List[bool]]:
-    """HTML 구조를 OTSL로 변환하고 데이터 존재 여부를 반환
-    
-    Args:
-        ann: PubTabNet annotation 딕셔너리
-        
-    Returns:
-        otsl_sequence: OTSL 토큰 시퀀스 (오류 시 None)
-        has_data_1D_list: 각 셀의 데이터 존재 여부 (1D 리스트)
-    """
-        
-        
     if 'html' not in ann or 'structure' not in ann['html'] or 'cells' not in ann['html']:
         print(f"Error: Missing required HTML structure")
         return None, []

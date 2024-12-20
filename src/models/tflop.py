@@ -3,16 +3,8 @@ from typing import Dict, Any, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
 
-from transformers import (
-    SwinModel,
-    SwinConfig,
-    BartModel,
-    BartConfig,
-    AutoImageProcessor
-)
-from transformers.models.bart.modeling_bart import shift_tokens_right
+from transformers import Swinv2Model, Swinv2Config, BartForCausalLM, BartConfig
 
 from .layout_encoder import LayoutEncoder
 from .layout_pointer import LayoutPointer
@@ -20,387 +12,218 @@ from .otsl_tokenizer import OTSLTokenizer
 from utils.util import get_coef_matrix
 
 class TFLOP(nn.Module):
-    def __init__(self, config: Any, inference_mode: bool = False) -> None:
+    def __init__(self, config: Any) -> None:
         super().__init__()
         self.config = config
-        self.inference_mode = inference_mode
-        # Tokenizer 초기화
-        self.tokenizer = OTSLTokenizer(
-            otsl_sequence_length=config.otsl_max_length
-        )
-        
-        # tokenizer에 종속되게 설정        
+        self.tokenizer = OTSLTokenizer(otsl_sequence_length=config.otsl_max_length)
         self.layout_prompt_length = config.total_sequence_length - config.otsl_max_length
         
-        # 1. Image Encoder (Swin Transformer)
-        self.swin_config = SwinConfig.from_pretrained(config.swin_model_name)
-        self.swin_config.image_size = config.image_size
-        self.image_encoder = SwinModel.from_pretrained(config.swin_model_name, config=self.swin_config)
+        self.swin_setup()
+        self.other_setup()
+        self.bart_setup()
+    
+    def swin_setup(self):
+        self.swin_config = Swinv2Config.from_pretrained(self.config.swin_model_name)
+        self.swin_config.image_size = self.config.image_size
+        self.image_encoder = Swinv2Model.from_pretrained(self.config.swin_model_name, config=self.swin_config)
         self.visual_proj = nn.Linear(
             self.image_encoder.config.hidden_size,
-            config.feature_dim
+            self.config.feature_dim
         )
         
-        # 2. Layout Encoder
+    def bart_setup(self):
+        self.bart_config = BartConfig(
+            is_decoder=True,
+            is_encoder_decoder=False,
+            add_cross_attention=True,
+            decoder_layers=4,  # Donut의 설정만 가져오기
+            
+            vocab_size=self.tokenizer.vocab_size,
+            d_model=self.config.feature_dim,
+            max_position_embeddings=self.config.total_sequence_length,
+            
+            pad_token_id=self.tokenizer.pad_token_id,
+            bos_token_id=self.tokenizer.bos_token_id,
+            eos_token_id=self.tokenizer.eos_token_id,
+        )
+        
+        self.bart = BartForCausalLM(self.bart_config)
+        self.bart.model.decoder.embed_tokens.padding_idx = self.tokenizer.pad_token_id
+        
+    def other_setup(self):
+        # Layout Encoder
         self.layout_encoder = LayoutEncoder(
-            feature_dim=config.feature_dim,
-            dropout=getattr(config, 'dropout', 0.1),
-            input_size=config.image_size
+            feature_dim=self.config.feature_dim,
+            dropout=getattr(self.config, 'dropout', 0.1),
+            input_size=self.config.image_size
         )
-        self.layout_pos_embed = nn.Embedding(config.total_sequence_length, config.feature_dim)
-        self.prompt_layer_norm = nn.LayerNorm(config.feature_dim)
+        self.layout_pos_embed = nn.Embedding(self.config.total_sequence_length, self.config.feature_dim)
+        self.prompt_layer_norm = nn.LayerNorm(self.config.feature_dim)
         
-        # 3. BART Decoder 초기화
-        self.bart_config = BartConfig.from_pretrained("facebook/bart-base")
-        self.bart_config.vocab_size = self.tokenizer.vocab_size
-        self.bart_config.d_model = config.feature_dim
-        self.bart_config.add_cross_attention = True
-
-        self.bart = BartModel(self.bart_config)
-        self.output_projection = nn.Linear(config.feature_dim, self.tokenizer.vocab_size, bias=True)
-
-        # 4. Layout Pointer
+        # Layout Pointer
         self.layout_pointer = LayoutPointer(
-            feature_dim=config.feature_dim,
-            temperature=getattr(config, 'temperature', 0.1),
+            feature_dim=self.config.feature_dim,
+            temperature=getattr(self.config, 'temperature', 0.1),
         )
-        self.row_span_proj = nn.Linear(config.feature_dim, config.feature_dim)
-        self.col_span_proj = nn.Linear(config.feature_dim, config.feature_dim)
-
-        # Layout prompt 관련 모듈들 추가
-        self.rel_pos_embed = nn.Embedding(32, config.feature_dim)  # relative position embedding
-        self.structure_q = nn.Linear(config.feature_dim, config.feature_dim)
-        self.structure_k = nn.Linear(config.feature_dim, config.feature_dim)
-        self.structure_v = nn.Linear(config.feature_dim, config.feature_dim)
-        self.structure_ffn = nn.Sequential(
-            nn.Linear(config.feature_dim, config.feature_dim * 4),
-            nn.ReLU(),
-            nn.Linear(config.feature_dim * 4, config.feature_dim)
-        )
-
+        self.row_span_proj = nn.Linear(self.config.feature_dim, self.config.feature_dim)
+        self.col_span_proj = nn.Linear(self.config.feature_dim, self.config.feature_dim)
+        
+        
     def prepare_layout_prompt(
         self,
-        layout_embedding: torch.Tensor,  # (B, N, D)
+        layout_embedding: torch.Tensor, 
     ) -> torch.Tensor:
-        """Layout embedding을 prompt로 변환
+        B, N, D = layout_embedding.shape      
 
-        Args:
-            layout_embedding: Layout encoder의 출력 (B, N, D)
-        """
-        B, N, D = layout_embedding.shape
-
-        # 1. Position embedding
         position_ids = torch.arange(N, device=layout_embedding.device)
-        position_embeddings = self.layout_pos_embed(position_ids)  # (N, D)
-
-        # 2. Structure-aware position embedding
-        # 각 bbox의 상대적 위치 관계를 인코딩
-        rel_pos_embeddings = self.get_relative_position_embeddings(N, D, device=layout_embedding.device)  # (N, N, D)
-        
-        # 3. Structure embedding
-        # 각 bbox의 구조적 특성 강화
-        structure_enhanced = self.structure_encoder(
-            layout_embedding,  # (B, N, D)
-            rel_pos_embeddings  # (N, N, D)
-        )  # (B, N, D)
-
-        # 4. Combine all embeddings
-        layout_prompt = (
-            structure_enhanced +  # 구조 정보
-            position_embeddings.unsqueeze(0) +  # 절대 위치
-            layout_embedding  # 원본 layout 정보
-        )
-
-        # 5. Final layer norm
+        position_embeddings = self.layout_pos_embed(position_ids) 
+        layout_prompt = layout_embedding + position_embeddings.unsqueeze(0)
         layout_prompt = self.prompt_layer_norm(layout_prompt)
-
+        
         return layout_prompt
-
-    def get_relative_position_embeddings(self, N: int, D: int, device: torch.device) -> torch.Tensor:
-        """상대적 위치 관계를 인코딩"""
-        pos_ids = torch.arange(N, device=device)
-        rel_pos = pos_ids.unsqueeze(0) - pos_ids.unsqueeze(1)  # (N, N)
-        
-        # Relative position embedding table
-        num_buckets = 32
-        rel_pos = self.relative_position_bucket(rel_pos, num_buckets=num_buckets)
-        rel_pos_embeddings = self.rel_pos_embed(rel_pos)  # (N, N, D)
-        
-        return rel_pos_embeddings
-
-    def structure_encoder(self, layout_embedding: torch.Tensor, rel_pos_embeddings: torch.Tensor) -> torch.Tensor:
-        """Layout의 구조적 특성을 강화"""
-        B, N, D = layout_embedding.shape
-        
-        # Self-attention with relative position
-        q = self.structure_q(layout_embedding)  # (B, N, D)
-        k = self.structure_k(layout_embedding)  # (B, N, D)
-        v = self.structure_v(layout_embedding)  # (B, N, D)
-        
-        # Attention scores with relative position bias
-        attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(D)  # (B, N, N)
-        
-        # Relative position bias - shape 맞추기
-        rel_pos_bias = torch.matmul(
-            rel_pos_embeddings,  # (N, N, D)
-            k.mean(dim=0).transpose(-2, -1)  # (D, N)
-        )  # (N, N, N)
-        rel_pos_bias = rel_pos_bias.mean(dim=-1)  # (N, N)
-        
-        # Add relative position bias
-        attn = attn + rel_pos_bias.unsqueeze(0)  # (B, N, N)
-        attn = F.softmax(attn, dim=-1)
-        
-        # Combine with values
-        out = torch.matmul(attn, v)  # (B, N, D)
-        
-        # FFN
-        out = self.structure_ffn(out)  # (B, N, D)
-        
-        return out
     
-    def prepare_cross_attention_mask(self, visual_features: torch.Tensor, layout_prompt: torch.Tensor) -> torch.Tensor:
-        """Generate structured cross-attention mask
-        
-        Args:
-            visual_features: (B, N, D)
-            layout_prompt: (B, L, D)
-        Returns:
-            cross_attn_mask: (B, N) - boolean mask
-        """
-        B, N, D = visual_features.shape
-        
-        # 1. Layout-aware attention mask
-        layout_attn = torch.matmul(
-            layout_prompt,  # (B, L, D)
-            visual_features.transpose(-2, -1)  # (B, D, N)
-        ) / math.sqrt(D)  # (B, L, N)
-        
-        # 2. Convert to boolean mask
-        # Mean over layout dimension to get importance per visual feature
-        feature_importance = layout_attn.mean(dim=1)  # (B, N)
-        
-        # Convert to boolean mask - keep features above mean importance
-        mean_importance = feature_importance.mean(dim=1, keepdim=True)
-        std_importance = feature_importance.std(dim=1, keepdim=True)
-        threshold = mean_importance - 0.5 * std_importance  # mean - 0.5*std as threshold
-        
-        cross_attn_mask = (feature_importance > threshold).to(torch.bool)  # (B, N)
-        
-        # Ensure at least half of the features are attended to
-        min_features = N // 2
-        for b in range(B):
-            if cross_attn_mask[b].sum() < min_features:
-                # If too few features are selected, take top k by value
-                _, top_indices = torch.topk(feature_importance[b], min_features)
-                cross_attn_mask[b] = torch.zeros_like(cross_attn_mask[b])
-                cross_attn_mask[b][top_indices] = True
-        
-        return cross_attn_mask
-
-    def enhance_visual_features(self, visual_features: torch.Tensor, layout_prompt: torch.Tensor) -> torch.Tensor:
-        """Enhance visual features with layout information
-        
-        Args:
-            visual_features: (B, N, D)
-            layout_prompt: (B, L, D)
-        Returns:
-            enhanced_features: (B, N, D)
-        """
-        # Layout-guided attention
-        attn_weights = torch.matmul(
-            visual_features,  # (B, N, D)
-            layout_prompt.transpose(-2, -1)  # (B, D, L)
-        ) / math.sqrt(visual_features.size(-1))  # (B, N, L)
-        attn_weights = F.softmax(attn_weights, dim=-1)
-        
-        # Combine with original features
-        enhanced_features = visual_features + torch.matmul(attn_weights, layout_prompt)
-        enhanced_features = F.layer_norm(enhanced_features, normalized_shape=[enhanced_features.size(-1)])
-        
-        return enhanced_features
-
+    
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-        """
-        Args:
-            batch: Dictionary containing:
-                - images: (B, C, H, W)
-                - bboxes: (B, num_boxes, 4)
-                - data_tag_mask: (B, total_length) - non-empty C 태그 위치
-                - empty_tag_mask: (B, total_length) - empty C 태그 위치
-                ...
-        """
-        images = batch['images']           
-        text_regions = batch['bboxes']  
-        
-        B = len(images)
-        
-        # 1. Image Encoding
-        encoder_outputs = self.image_encoder(images, output_hidden_states=True)
+        # 이미지 인코딩
+        encoder_outputs = self.image_encoder(batch['images'], output_hidden_states=True)
         visual_features = encoder_outputs.last_hidden_state
         visual_features = F.normalize(visual_features, p=2, dim=-1)
         visual_features = self.visual_proj(visual_features)
 
-        # 2. Layout encoding & prompt preparation
-        layout_embedding = self.layout_encoder(text_regions, visual_features)
+        # 레이아웃 인코딩
+        layout_embedding = self.layout_encoder(batch['bboxes'], visual_features)
         layout_prompt = self.prepare_layout_prompt(layout_embedding)
         
-        # 3. Enhance visual features with layout information
-        enhanced_visual_features = self.enhance_visual_features(visual_features, layout_prompt)
-        
+        # 모드에 따라 다른 forward path 실행
         if self.training:
-            labels = batch['token_ids']     
-            attention_mask = batch['attention_mask']   # (B, total_sequence_length)
-            
-            decoder_input_ids = shift_tokens_right(
-                labels,
-                self.tokenizer.pad_token_id,
-                self.tokenizer.bos_token_id
-            )
-            
-            token_embeds = self.bart.decoder.embed_tokens(decoder_input_ids)
-            prompt_inputs = torch.cat([
-                layout_prompt,
-                token_embeds
-            ], dim=1)
-            
-            # 1. Padding mask 생성
-            padding_mask = torch.ones_like(attention_mask)
-            padding_mask[:, layout_prompt.size(1):] = (decoder_input_ids != self.tokenizer.pad_token_id)
-            
-            decoder_outputs = self.bart.decoder(
-                inputs_embeds=prompt_inputs,
-                attention_mask=padding_mask,  # padding mask만 전달
-                encoder_hidden_states=enhanced_visual_features,
-                use_cache=False,
-                output_hidden_states=True,
-                return_dict=True
-            )
-        
+            return self._train_forward(batch, visual_features, layout_prompt)
         else:
-            # print("!"*100)
-            # print("[디버깅] 추론 모드 시작")
-            
-            # 초기 BOS 토큰으로 시작
-            curr_ids = torch.full(
-                (B, 1),
-                self.tokenizer.bos_token_id,
-                dtype=torch.long,
-                device=images.device
-            )
-            # print(f"[디버깅] 초기 BOS 토큰 ID: {curr_ids}")
-            
-            max_length = self.tokenizer.otsl_sequence_length
-            # print(f"[디버깅] 최대 생성 길이: {max_length}")
-            
-            # Layout prompt의 길이
-            prompt_length = layout_prompt.size(1)
-            # print(f"[디버깅] Layout prompt 길이: {prompt_length}")
-            
-            for step in range(max_length-1):
-                # print(f"\n[디버깅] Step {step} 시작")
-                
-                # 현재까지의 시퀀스 길이
-                curr_length = curr_ids.size(1)
-                # print(f"[디버깅] 현재 시퀀스 길이: {curr_length}")
-                # print(f"[디버깅] 현재까지 생성된 토큰: {[self.tokenizer.id2token[id.item()] for id in curr_ids[0]]}")
-                
-                # Attention mask 생성
-                attention_mask = torch.ones(
-                    (B, prompt_length + curr_length),
-                    dtype=torch.bool,
-                    device=images.device
-                )
-                attention_mask[:, :prompt_length] = True
-                attention_mask[:, prompt_length:prompt_length + curr_length] = True
-                # print(f"[디버깅] Attention mask 크기: {attention_mask.shape}")
-                
-                token_embeds = self.bart.decoder.embed_tokens(curr_ids)
-                prompt_inputs = torch.cat([layout_prompt, token_embeds], dim=1)
-                # print(f"[디버깅] Decoder 입력 임베딩 크기: {prompt_inputs.shape}")
-                
-                decoder_outputs = self.bart.decoder(
-                    inputs_embeds=prompt_inputs,
-                    attention_mask=attention_mask,
-                    encoder_hidden_states=enhanced_visual_features,
-                    use_cache=True,
-                    output_hidden_states=True,
-                    return_dict=True
-                )
-                
-                last_hidden_state = decoder_outputs.last_hidden_state
-                logits = self.output_projection(last_hidden_state[:, -1:])
-                # print(f"[디버깅] 로짓 크기: {logits.shape}")
-                
-                # Top-5 토큰 확률 출력
-                probs = F.softmax(logits.squeeze(1), dim=-1)
-                top5_probs, top5_indices = probs.topk(5)
-                # print("\n[디버깅] Top-5 예측 토큰:")
-                # for prob, idx in zip(top5_probs[0], top5_indices[0]):
-                    # token = self.tokenizer.id2token[idx.item()]
-                    # print(f"  {token}: {prob.item():.4f}")
-                
-                next_token = torch.argmax(logits.squeeze(1), dim=-1, keepdim=True)
-                # print(f"[디버깅] 선택된 다음 토큰: {self.tokenizer.id2token[next_token[0].item()]}")
-                
-                curr_ids = torch.cat([curr_ids, next_token], dim=1)
-            
-            # print("\n[디버깅] 최종 생성된 시퀀스:")
-            # print([self.tokenizer.id2token[id.item()] for id in curr_ids[0]])
-            # training과 동일한 입력 형태 구성
-            decoder_input_ids = curr_ids
-            token_embeds = self.bart.decoder.embed_tokens(decoder_input_ids)
-            prompt_inputs = torch.cat([
-                layout_prompt,
-                token_embeds
-            ], dim=1)
-            
-            decoder_outputs = self.bart.decoder(
-                inputs_embeds=prompt_inputs,
-                encoder_hidden_states=enhanced_visual_features,
-                use_cache=False,
+            return self._eval_forward(batch, visual_features, layout_prompt)
+    
+    def _train_forward(self, batch, visual_features, layout_prompt):
+        """Teacher forcing: Use ground truth tags for training"""
+        # Prepare inputs: [layout_prompt | target_tags]
+        target_tags = batch['token_ids']
+        tag_embeds = self.bart.model.decoder.embed_tokens(target_tags)
+        decoder_inputs = torch.cat([layout_prompt, tag_embeds], dim=1)
+        
+        # Prepare labels: [-100 padding | target_tags]
+        label_padding = torch.full(
+            (target_tags.size(0), layout_prompt.size(1)),
+            fill_value=-100,
+            dtype=target_tags.dtype,
+            device=target_tags.device
+        )
+        labels = torch.cat([label_padding, target_tags], dim=1)
+        
+        # Generate with teacher forcing
+        outputs = self.bart(
+            inputs_embeds=decoder_inputs,
+            encoder_hidden_states=visual_features,
+            attention_mask=torch.ones(layout_prompt.size()[:2], device=layout_prompt.device),
+            labels=labels,
+            output_hidden_states=True,
+            return_dict=True
+        )
+        
+        # Extract features for alignment
+        hidden_states = outputs.hidden_states[-1]
+        box_features = hidden_states[:, :layout_prompt.size(1), :]
+        tag_features = hidden_states[:, layout_prompt.size(1):, :]
+        
+        # Compute box-tag alignments
+        pointer_logits, empty_logits = self.layout_pointer(box_features, tag_features)
+        row_sim, col_sim = self.get_sim_matrix(box_features)
+        row_coef, col_coef = get_coef_matrix(target_tags, self.tokenizer, self.layout_prompt_length)
+        
+        return {
+            'tag_logits': outputs.logits[:, self.layout_prompt_length:, :],
+            'pointer_logits': pointer_logits,
+            'empty_pointer_logits': empty_logits,
+            'row_sim_matrix': row_sim,
+            'col_sim_matrix': col_sim,
+            'row_span_coef': row_coef,
+            'col_span_coef': col_coef,
+        }
+        
+    def _eval_forward(self, batch, visual_features, layout_prompt):
+        """검증/추론 모드에서의 forward path (greedy decoding)"""
+        batch_size = layout_prompt.size(0)
+        
+        # 초기 입력 설정
+        bos_ids = torch.full((batch_size, 1), self.tokenizer.bos_token_id, device=layout_prompt.device)
+        bos_embeds = self.bart.model.decoder.embed_tokens(bos_ids)
+        current_embeds = torch.cat([layout_prompt, bos_embeds], dim=1)
+        
+        generated_ids = []
+        attention_mask = torch.ones(batch_size, current_embeds.size(1), device=layout_prompt.device)
+        
+        # Greedy decoding
+        for step in range(self.tokenizer.otsl_sequence_length):
+            # attention mask 업데이트
+            outputs = self.bart(
+                inputs_embeds=current_embeds,
+                encoder_hidden_states=visual_features,
+                attention_mask=attention_mask,
+                use_cache=True,  # 캐시 사용으로 디코딩 속도 향상
                 output_hidden_states=True,
                 return_dict=True
             )
             
+            # 다음 토큰 예측
+            next_token_logits = outputs.logits[:, -1, :]  # 마지막 위치의 logits만 사용
             
-        last_hidden_state = decoder_outputs.last_hidden_state
+            # 디버깅을 위한 로깅
+            if step == 0:
+                print("Initial prediction probabilities:")
+                probs = torch.softmax(next_token_logits, dim=-1)
+                top_probs, top_indices = probs[0].topk(5)
+                for idx, prob in zip(top_indices, top_probs):
+                    print(f"Token: {self.tokenizer.id2token[idx.item()]}, Prob: {prob.item():.4f}")
+            
+            # 불가능한 토큰 마스킹 (선택적)
+            # next_token_logits[:, self.tokenizer.invalid_token_ids] = float('-inf')
+            
+            next_token = next_token_logits.argmax(dim=-1)
+            generated_ids.append(next_token)
+            
+            # EOS 토큰이 나오면 생성 중단
+            if (next_token == self.tokenizer.eos_token_id).any():
+                break
+                
+            # 다음 스텝을 위한 임베딩 준비
+            next_embeds = self.bart.model.decoder.embed_tokens(next_token.unsqueeze(-1))
+            current_embeds = torch.cat([current_embeds, next_embeds], dim=1)
+            attention_mask = torch.cat([
+                attention_mask, 
+                torch.ones(batch_size, 1, device=layout_prompt.device)
+            ], dim=1)
+        
+        # 생성된 시퀀스 처리
+        generated_ids = torch.stack(generated_ids, dim=1)  # (batch_size, seq_len)
+        
+        # 마지막 hidden states 추출
+        last_hidden_state = outputs.hidden_states[-1]
         bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]
-        logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]  
-
-        tag_logits = self.output_projection(logical_structure_embeddings)
+        logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]
         
         pointer_logits, empty_pointer_logits = self.layout_pointer(
             box_features=bbox_embeddings,
             tag_features=logical_structure_embeddings
         )
-    
-
-        row_sim_matrix, col_sim_matrix = None, None
-        row_span_coef, col_span_coef = None, None
-        if self.training:
-            row_sim_matrix, col_sim_matrix = self.get_sim_matrix(
-                bbox_embeddings,
-                attention_mask=attention_mask[:, :self.layout_prompt_length]
-            )
         
-            row_span_coef, col_span_coef = get_coef_matrix(
-                labels,
-                self.tokenizer, 
-                self.layout_prompt_length
-            )
-
         return {
-            'tag_logits': tag_logits,
+            'tag_logits': outputs.logits[:, layout_prompt.size(1):, :],
             'pointer_logits': pointer_logits,
             'empty_pointer_logits': empty_pointer_logits,
-            'row_sim_matrix': row_sim_matrix,
-            'col_sim_matrix': col_sim_matrix,
-            'row_span_coef': row_span_coef,
-            'col_span_coef': col_span_coef,
+            'generated_ids': generated_ids,
+            'row_sim_matrix': None,
+            'col_sim_matrix': None,
+            'row_span_coef': None,
+            'col_span_coef': None,
         }
 
-    def get_sim_matrix(self, box_features: torch.Tensor, attention_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def get_sim_matrix(self, box_features: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         B, N, D = box_features.shape
         
         # 1. Project layout embeddings
@@ -414,33 +237,9 @@ class TFLOP(nn.Module):
         # 3. Compute pairwise similarities
         row_sim_matrix = torch.matmul(row_projected, row_projected.transpose(-2, -1))  # (B, N, N)
         col_sim_matrix = torch.matmul(col_projected, col_projected.transpose(-2, -1))  # (B, N, N)
-        
-        # 4. Apply attention mask
-        mask = attention_mask.unsqueeze(1) * attention_mask.unsqueeze(2)  # (B, N, N)
-        row_sim_matrix = row_sim_matrix * mask
-        col_sim_matrix = col_sim_matrix * mask
-        
         # 5. Set diagonal to zero to exclude self-similarity
         diag_mask = ~torch.eye(N, device=box_features.device, dtype=torch.bool).unsqueeze(0)
         row_sim_matrix = row_sim_matrix * diag_mask
         col_sim_matrix = col_sim_matrix * diag_mask
         
         return row_sim_matrix, col_sim_matrix
-
-    def relative_position_bucket(self, relative_position: torch.Tensor, num_buckets: int = 32) -> torch.Tensor:
-        """상대적 위치를 bucket index로 변환"""
-        # 1. 절대값 계산
-        relative_buckets = torch.abs(relative_position)
-        
-        # 2. Sign 정보 보존 (음수: 0, 양수: num_buckets/2)
-        relative_buckets = torch.where(
-            relative_position < 0,
-            relative_buckets,
-            relative_buckets + num_buckets // 2
-        )
-        
-        # 3. Bucketing
-        max_distance = num_buckets // 2
-        relative_buckets = torch.clamp(relative_buckets, 0, max_distance - 1)
-        
-        return relative_buckets

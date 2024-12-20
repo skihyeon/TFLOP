@@ -13,11 +13,12 @@ class ModelConfig:
     # swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
     
     
-    feature_dim: int = 768      # 모델의 hidden dimension 크기       # 논문 1024
-    total_sequence_length: int = 1024  # 최대 시퀀스(토큰) 길이        # 논문 1376 # bart position embedding최대 길이 1024
-    otsl_max_length: int = 30
-    image_size: int = 672    
-    swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
+    feature_dim: int = 1024      # 모델의 hidden dimension 크기       # 논문 1024
+    total_sequence_length: int = 1376  # 최대 시퀀스(토큰) 길이        # 논문 1376 # bart position embedding최대 길이 1024
+    otsl_max_length: int = 100
+    image_size: int = 768  
+    # swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
+    swin_model_name: str = "microsoft/swinv2-base-patch4-window8-256"
     
     
     
@@ -41,11 +42,11 @@ class ModelConfig:
 class TrainingConfig:
     """학습 설정"""
     exp_name: str = "TFLOP_base"
-    use_wandb: bool = True
+    use_wandb: bool = False
     
     # Resume training
-    resume_training: bool = False
-    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241219_1008_TFLOP_base/checkpoints/TFLOP_base_epoch=29.ckpt"
+    resume_training: bool = True
+    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241220_1832_TFLOP_base/checkpoints/TFLOP_base_epoch=3.ckpt"
     # resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241211_1551_TFLOP_tiny/checkpoints/TFLOP_epoch=130.ckpt"
     
     # Data
@@ -57,15 +58,15 @@ class TrainingConfig:
     num_epochs: int = 1000
     checkpoint_dir: str = "./checkpoints"
     
-    batch_size: int = 2
-    accumulate_grad_batches: int = 16
+    batch_size: int = 3
+    accumulate_grad_batches: int = 12
     learning_rate: float = 1e-4
     
     # Device & Hardware
     gpu_id: int = 1  # 기본 GPU ID (단일 GPU 사용시)
     devices: list = None  # for multi-GPU
     accelerator: str = "gpu"
-    strategy: str = "ddp_find_unused_parameters_true"  # 미사용 파라미터 감지 활성화
+    strategy: str = "ddp"  # 미사용 파라미터 감지 활성화
     sync_batchnorm: bool = True  # DDP에서 배치 정규화 동기화
     replace_sampler_ddp: bool = True  # DDP에서 샘플러 자동 교체
     
@@ -81,7 +82,7 @@ class TrainingConfig:
     def __post_init__(self):
         # devices 설정 수정
         if self.devices is None:
-            self.devices = [0,1]  # 0번과 1번 GPU만 사용하도록 설정
+            self.devices = [0]  
         
         # accelerator 설정
         if not torch.cuda.is_available():

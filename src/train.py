@@ -33,7 +33,6 @@ def main():
     model = TFLOPLightningModule(
         model_config=model_config,
         train_config=train_config,
-        inference_mode=False
     )
     
     callbacks = [

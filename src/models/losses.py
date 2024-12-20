@@ -161,21 +161,30 @@ class TFLOPLoss(nn.Module):
     def compute_tag_loss(self, tag_logits, tag_targets):
         """
         Args:
-            tag_logits: (B, S, V)
-            tag_targets: (B, V)
+            tag_logits: (B, S1, V) - 생성된 시퀀스의 logits
+            tag_targets: (B, S2) - target 시퀀스 (S2가 S1보다 길 수 있음)
         """
-        # print(f"tag_logits shape: {tag_logits.shape}")
-        # print(f"tag_targets shape: {tag_targets.shape}")
-        # print(f"tag_logits stats: min={tag_logits.min():.3f}, max={tag_logits.max():.3f}")
-        # print(f"unique targets: {torch.unique(tag_targets).tolist()}")
-    
+        B, S1, V = tag_logits.shape
+        _, S2 = tag_targets.shape
+        
+        if S1 < S2:
+            # pad_logits: 패딩 토큰에 대해 높은 확률을 주는 logits
+            pad_logits = torch.full(
+                (B, S2-S1, V), 
+                float('-inf'),  # 모든 토큰에 대해 매우 낮은 확률
+                device=tag_logits.device
+            )
+            pad_logits[:, :, self.tokenizer.pad_token_id] = 0  # pad 토큰만 0으로 설정
+            
+            # 원래 logits와 패딩 logits 합치기
+            tag_logits = torch.cat([tag_logits, pad_logits], dim=1)  # (B, S2, V)
+        
         return F.cross_entropy(
-            tag_logits.reshape(-1, self.tokenizer.vocab_size),  # (B*S, V)
-            tag_targets.reshape(-1),  # (B*S)
+            tag_logits.reshape(-1, V),  # (B*S2, V)
+            tag_targets.reshape(-1),    # (B*S2)
             ignore_index=self.tokenizer.pad_token_id,
             label_smoothing=0.1
         )
-
     def forward(self, batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
 
         # Batch inputs
