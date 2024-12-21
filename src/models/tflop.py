@@ -147,7 +147,6 @@ class TFLOP(nn.Module):
         }
         
     def _eval_forward(self, batch, visual_features, layout_prompt):
-        """검증/추론 모드에서의 forward path (greedy decoding)"""
         batch_size = layout_prompt.size(0)
         
         # 초기 입력 설정
@@ -158,44 +157,64 @@ class TFLOP(nn.Module):
         generated_ids = []
         attention_mask = torch.ones(batch_size, current_embeds.size(1), device=layout_prompt.device)
         
+        # 디버깅을 위한 정보
+        print(f"Tokenizer vocab size: {self.tokenizer.vocab_size}")
+        print(f"BOS token id: {self.tokenizer.bos_token_id}")
+        print(f"EOS token id: {self.tokenizer.eos_token_id}")
+        
         # Greedy decoding
         for step in range(self.tokenizer.otsl_sequence_length):
-            # attention mask 업데이트
             outputs = self.bart(
                 inputs_embeds=current_embeds,
                 encoder_hidden_states=visual_features,
                 attention_mask=attention_mask,
-                use_cache=True,  # 캐시 사용으로 디코딩 속도 향상
+                use_cache=True,
                 output_hidden_states=True,
                 return_dict=True
             )
             
-            # 다음 토큰 예측
-            next_token_logits = outputs.logits[:, -1, :]  # 마지막 위치의 logits만 사용
+            next_token_logits = outputs.logits[:, -1, :]
             
-            # 디버깅을 위한 로깅
-            if step == 0:
-                print("Initial prediction probabilities:")
+            # 디버깅: logits 분포 확인
+            if step < 3:  # 처음 3 스텝만 출력
+                print(f"\nStep {step} logits statistics:")
+                print(f"Logits shape: {next_token_logits.shape}")
+                print(f"Logits mean: {next_token_logits.mean().item():.4f}")
+                print(f"Logits std: {next_token_logits.std().item():.4f}")
+                
+                # Top-5 토큰과 확률 출력
                 probs = torch.softmax(next_token_logits, dim=-1)
                 top_probs, top_indices = probs[0].topk(5)
+                print("Top 5 predictions:")
                 for idx, prob in zip(top_indices, top_probs):
-                    print(f"Token: {self.tokenizer.id2token[idx.item()]}, Prob: {prob.item():.4f}")
+                    token = self.tokenizer.id2token.get(idx.item(), f"UNKNOWN_{idx.item()}")
+                    print(f"Token: {token}, ID: {idx.item()}, Prob: {prob.item():.4f}")
             
-            # 불가능한 토큰 마스킹 (선택적)
-            # next_token_logits[:, self.tokenizer.invalid_token_ids] = float('-inf')
+            # 유효하지 않은 토큰 마스킹
+            invalid_tokens = [self.tokenizer.pad_token_id]  # 필요한 경우 다른 토큰 추가
+            for invalid_id in invalid_tokens:
+                if invalid_id is not None:
+                    next_token_logits[:, invalid_id] = float('-inf')
             
             next_token = next_token_logits.argmax(dim=-1)
+            
+            # 디버깅: 생성된 토큰 확인
+            if step < 3:
+                print(f"Generated token at step {step}: {next_token.tolist()}")
+                print(f"Token text: {[self.tokenizer.id2token.get(t.item(), 'UNK') for t in next_token]}")
+            
+            # EOS 토큰 체크
+            if (next_token == self.tokenizer.eos_token_id).any():
+                print(f"EOS token generated at step {step}")
+                break
+            
             generated_ids.append(next_token)
             
-            # EOS 토큰이 나오면 생성 중단
-            if (next_token == self.tokenizer.eos_token_id).any():
-                break
-                
-            # 다음 스텝을 위한 임베딩 준비
+            # 다음 스텝 준비
             next_embeds = self.bart.model.decoder.embed_tokens(next_token.unsqueeze(-1))
             current_embeds = torch.cat([current_embeds, next_embeds], dim=1)
             attention_mask = torch.cat([
-                attention_mask, 
+                attention_mask,
                 torch.ones(batch_size, 1, device=layout_prompt.device)
             ], dim=1)
         
