@@ -38,7 +38,6 @@ def main():
         shuffle=False,
         num_workers=train_config.num_workers,
         pin_memory=train_config.pin_memory,
-        use_length_sampler=False,
         drop_last=False
     )
     

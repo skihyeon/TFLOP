@@ -168,11 +168,6 @@ class TFLOP(nn.Module):
                     device=layout_prompt.device
                 )
 
-            
-            attention_mask[:, :prompt_length] = True
-            attention_mask[:, prompt_length:prompt_length + curr_length] = True
-
-
             token_embeds = self.bart.model.decoder.embed_tokens(curr_ids)
             prompt_inputs = torch.cat([layout_prompt, token_embeds], dim=1)
 

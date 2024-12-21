@@ -99,7 +99,7 @@ def main():
         logger=logger,
         callbacks=callbacks,
         enable_checkpointing=True,
-        deterministic=True,
+        deterministic=False,
         benchmark=False
     )
 
