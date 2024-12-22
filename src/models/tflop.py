@@ -141,20 +141,59 @@ class TFLOP(nn.Module):
     def _eval_forward(self, batch, visual_features, layout_prompt):
         batch_size = layout_prompt.size(0)
         
-        visual_features = ModelOutput(last_hidden_state=visual_features)
-        decoder_output = self.logical_structure_decoder.bart.generate(
-            decoder_input_ids = layout_prompt,
-            encoder_outputs = visual_features,
-            max_length = self.config.otsl_max_length,
-            pad_token_id = self.tokenizer.pad_token_id,
-            eos_token_id = self.tokenizer.eos_token_id,
-            use_cache = True,
-            num_beams = 1,
-            return_dict_in_generate=True,
+        # 초기 입력 설정
+        curr_ids = torch.full(
+            (batch_size, 1),
+            self.tokenizer.bos_token_id,
+            dtype=torch.long,
+            device=layout_prompt.device
         )
-        print(decoder_output)
+        
+        prompt_length = layout_prompt.size(1)
+
+        # Greedy decoding
+        for step in range(self.tokenizer.otsl_sequence_length - 1):
+            curr_length = curr_ids.size(1)
+            attention_mask = torch.ones(
+                    (batch_size, prompt_length + curr_length),
+                    dtype=torch.bool,
+                    device=layout_prompt.device
+                )
+
+            token_embeds = self.bart.model.decoder.embed_tokens(curr_ids)
+            prompt_inputs = torch.cat([layout_prompt, token_embeds], dim=1)
+
+            decoder_outputs = self.bart.model.decoder(
+                inputs_embeds=prompt_inputs,
+                attention_mask=attention_mask,
+                encoder_hidden_states=visual_features,
+                use_cache=True,
+                output_hidden_states=True,
+                return_dict=True
+            )
+
+            last_hidden_state = decoder_outputs.last_hidden_state
+            logits = self.output_projection(last_hidden_state[:, -1:])
+
+            next_token = torch.argmax(logits.squeeze(1), dim=-1, keepdim=True)
+            curr_ids = torch.cat([curr_ids, next_token], dim=1)
+
+        decoder_input_ids = curr_ids
+        token_embeds = self.bart.model.decoder.embed_tokens(decoder_input_ids)
+        prompt_inputs = torch.cat([
+            layout_prompt,
+            token_embeds
+        ], dim=1)
+        
+        decoder_outputs = self.bart.model.decoder(
+            inputs_embeds=prompt_inputs,
+            encoder_hidden_states=visual_features,
+            use_cache=False,
+            output_hidden_states=True,
+            return_dict=True
+        )
         # 마지막 hidden states 추출
-        last_hidden_state = outputs.hidden_states[-1]
+        last_hidden_state = decoder_outputs.hidden_states[-1]
         bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]
         logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]
         
