@@ -15,8 +15,8 @@ from pathlib import Path
 # 디버그 모드 설정
 DEBUG = True
 DEBUG_SAMPLES = {
-    'train': 2000,
-    'val': 200
+    'train': 20000,
+    'val': 1000
 }
 
 class TableDataset(Dataset):

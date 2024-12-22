@@ -4,8 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from transformers import Swinv2Model, Swinv2Config, BartForCausalLM, BartConfig
-
+from transformers import Swinv2Model, Swinv2Config, BartForCausalLM, BartConfig, BartModel
+from transformers.models.bart.modeling_bart import shift_tokens_right
 from .layout_encoder import LayoutEncoder
 from .layout_pointer import LayoutPointer
 from .otsl_tokenizer import OTSLTokenizer
@@ -34,7 +34,7 @@ class TFLOP(nn.Module):
     def bart_setup(self):
         self.bart_config = BartConfig(
             is_decoder=True,
-            is_encoder_decoder=False,
+            # is_encoder_decoder=False,
             add_cross_attention=True,
             decoder_layers=12, 
             decoder_attention_heads=16, 
@@ -48,10 +48,11 @@ class TFLOP(nn.Module):
             eos_token_id=self.tokenizer.eos_token_id,
         )
         
-        self.bart = BartForCausalLM(self.bart_config)
+        # self.bart = BartForCausalLM(self.bart_config)
+        self.bart = BartModel(self.bart_config)
         # self.bart.config.is_encoder_decoder = True
-        self.bart.model.decoder.embed_tokens.padding_idx = self.tokenizer.pad_token_id
-        
+        self.bart.decoder.embed_tokens.padding_idx = self.tokenizer.pad_token_id
+        self.output_projection = nn.Linear(self.config.feature_dim, self.tokenizer.vocab_size)
     def other_setup(self):
         # Layout Encoder
         self.layout_encoder = LayoutEncoder(
@@ -103,103 +104,128 @@ class TFLOP(nn.Module):
             return self._eval_forward(batch, visual_features, layout_prompt)
     
     def _train_forward(self, batch, visual_features, layout_prompt):
-        """Teacher forcing: Use ground truth tags for training"""
-        # Prepare inputs: [layout_prompt | target_tags]
-        target_tags = batch['token_ids']
-        tag_embeds = self.bart.model.decoder.embed_tokens(target_tags)
-        decoder_inputs = torch.cat([layout_prompt, tag_embeds], dim=1)
+        labels = batch['token_ids']     
         
-        # layout prompt 부분은 loss 계산에서 제외 (-100)
-        # 모델은 이 부분을 예측하려 하지 않고, context로만 사용
-        label_padding = torch.full(
-            (target_tags.size(0), layout_prompt.size(1)),
-            fill_value=-100,
-            dtype=target_tags.dtype,
-            device=target_tags.device
+        decoder_input_ids = shift_tokens_right(
+            labels,
+            self.tokenizer.pad_token_id,
+            self.tokenizer.bos_token_id
         )
-        labels = torch.cat([label_padding, target_tags], dim=1)
         
-        outputs = self.bart(
-            inputs_embeds=decoder_inputs,  # layout prompt를 입력으로 제공
+        token_embeds = self.bart.decoder.embed_tokens(decoder_input_ids)
+        prompt_inputs = torch.cat([
+            layout_prompt,
+            token_embeds
+        ], dim=1)
+        
+        # 1. Padding mask 생성
+        padding_mask = torch.ones(prompt_inputs.size(0), prompt_inputs.size(1), device=prompt_inputs.device)
+        padding_mask[:, layout_prompt.size(1):] = (decoder_input_ids != self.tokenizer.pad_token_id)
+        
+        decoder_outputs = self.bart.decoder(
+            inputs_embeds=prompt_inputs,
+            attention_mask=padding_mask,  # padding mask만 전달
             encoder_hidden_states=visual_features,
-            attention_mask=torch.ones(decoder_inputs.size()[:2], device=decoder_inputs.device),
-            labels=labels,  # prompt 부분은 -100으로 마스킹하여 loss 계산에서 제외
+            use_cache=False,
             output_hidden_states=True,
             return_dict=True
         )
         
-        # Extract features for alignment
-        hidden_states = outputs.hidden_states[-1]
-        box_features = hidden_states[:, :layout_prompt.size(1), :]
-        tag_features = hidden_states[:, layout_prompt.size(1):, :]
-        
-        # Compute box-tag alignments
-        pointer_logits, empty_logits = self.layout_pointer(box_features, tag_features)
-        row_sim, col_sim = self.get_sim_matrix(box_features)
-        row_coef, col_coef = get_coef_matrix(target_tags, self.tokenizer, self.layout_prompt_length)
-        
-        return {
-            'tag_logits': outputs.logits[:, self.layout_prompt_length:, :],
-            'pointer_logits': pointer_logits,
-            'empty_pointer_logits': empty_logits,
-            'row_sim_matrix': row_sim,
-            'col_sim_matrix': col_sim,
-            'row_span_coef': row_coef,
-            'col_span_coef': col_coef,
-        }
-        
-    def _eval_forward(self, batch, visual_features, layout_prompt):
-        batch_size = layout_prompt.size(0)
-        
-        # 초기 입력 설정
-        bos_ids = torch.full((batch_size, 1), self.tokenizer.bos_token_id, device=layout_prompt.device)
-        bos_embeds = self.bart.model.decoder.embed_tokens(bos_ids)
-        current_embeds = torch.cat([layout_prompt, bos_embeds], dim=1)
-        attention_mask = torch.ones(batch_size, current_embeds.size(1), device=layout_prompt.device)
-        
-        # 생성된 토큰을 저장할 리스트
-        generated_tokens = [bos_ids]
-        
-        # Greedy decoding
-        for step in range(self.tokenizer.otsl_sequence_length):
-            outputs = self.bart(
-                inputs_embeds=current_embeds,
-                encoder_hidden_states=visual_features,
-                attention_mask=attention_mask,
-                use_cache=True,
-                output_hidden_states=True,
-                return_dict=True
-            )
-            
-            next_token_logits = outputs.logits[:, -1, :]
-            next_token = next_token_logits.argmax(dim=-1)
-            
-            # 생성된 토큰 저장
-            generated_tokens.append(next_token.unsqueeze(-1))
-            next_embeds = self.bart.model.decoder.embed_tokens(next_token.unsqueeze(-1))
-            current_embeds = torch.cat([current_embeds, next_embeds], dim=1)
-            attention_mask = torch.cat([
-                attention_mask,
-                torch.ones(batch_size, 1, device=layout_prompt.device)
-            ], dim=1)
-        
-        # 생성된 토큰들을 하나의 텐서로 결합
-        generated_ids = torch.cat(generated_tokens, dim=1)
-        # 마지막 hidden states 추출 및 포인터 로직
-        last_hidden_state = outputs.hidden_states[-1]
+        last_hidden_state = decoder_outputs.last_hidden_state
         bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]
-        logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]
+        logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]  
+
+        tag_logits = self.output_projection(logical_structure_embeddings)
         
         pointer_logits, empty_pointer_logits = self.layout_pointer(
             box_features=bbox_embeddings,
             tag_features=logical_structure_embeddings
         )
+        row_sim_matrix, col_sim_matrix = self.get_sim_matrix(
+            bbox_embeddings
+        )
+    
+        row_span_coef, col_span_coef = get_coef_matrix(
+            labels,
+            self.tokenizer, 
+            self.layout_prompt_length
+        )
         
         return {
-            'tag_logits': outputs.logits[:, layout_prompt.size(1):, :],
+            'tag_logits': tag_logits,
             'pointer_logits': pointer_logits,
             'empty_pointer_logits': empty_pointer_logits,
-            'generated_ids': generated_ids,
+            'row_sim_matrix': row_sim_matrix,
+            'col_sim_matrix': col_sim_matrix,
+            'row_span_coef': row_span_coef,
+            'col_span_coef': col_span_coef,
+        }
+        
+    def _eval_forward(self, batch, visual_features, layout_prompt):
+        B = layout_prompt.size(0)
+        curr_ids = torch.full(
+                (B, 1),
+                self.tokenizer.bos_token_id,
+                dtype=torch.long,
+                device=layout_prompt.device
+            )
+        max_length = self.tokenizer.otsl_sequence_length
+        prompt_length = layout_prompt.size(1)
+
+        for step in range(max_length-1):
+            curr_length = curr_ids.size(1)
+            attention_mask = torch.ones(
+                    (B, prompt_length + curr_length),
+                    dtype=torch.bool,
+                    device=layout_prompt.device
+                )           
+            token_embeds = self.bart.decoder.embed_tokens(curr_ids)
+            prompt_inputs = torch.cat([layout_prompt, token_embeds], dim=1)          
+
+            decoder_outputs = self.bart.decoder(
+                inputs_embeds=prompt_inputs,
+                attention_mask=attention_mask,
+                encoder_hidden_states=visual_features,
+                use_cache=True,
+                output_hidden_states=True,
+                return_dict=True
+            )
+            last_hidden_state = decoder_outputs.last_hidden_state
+            logits = self.output_projection(last_hidden_state[:, -1:])    
+            next_token = torch.argmax(logits.squeeze(1), dim=-1, keepdim=True)    
+            curr_ids = torch.cat([curr_ids, next_token], dim=1)
+
+        decoder_input_ids = curr_ids
+        token_embeds = self.bart.decoder.embed_tokens(decoder_input_ids)
+        prompt_inputs = torch.cat([
+            layout_prompt,
+            token_embeds
+        ], dim=1)
+        
+        decoder_outputs = self.bart.decoder(
+            inputs_embeds=prompt_inputs,
+            encoder_hidden_states=visual_features,
+            use_cache=False,
+            output_hidden_states=True,
+            return_dict=True
+        )
+
+        last_hidden_state = decoder_outputs.last_hidden_state
+        bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]
+        logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]  
+
+        tag_logits = self.output_projection(logical_structure_embeddings)
+        
+        pointer_logits, empty_pointer_logits = self.layout_pointer(
+            box_features=bbox_embeddings,
+            tag_features=logical_structure_embeddings
+        )
+
+
+        return {
+            'tag_logits': tag_logits,
+            'pointer_logits': pointer_logits,
+            'empty_pointer_logits': empty_pointer_logits,
             'row_sim_matrix': None,
             'col_sim_matrix': None,
             'row_span_coef': None,

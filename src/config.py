@@ -42,11 +42,11 @@ class ModelConfig:
 class TrainingConfig:
     """학습 설정"""
     exp_name: str = "TFLOP_base"
-    use_wandb: bool = False
+    use_wandb: bool = True
     
     # Resume training
     resume_training: bool = True
-    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241222_1421_TFLOP_base/checkpoints/TFLOP_base_epoch=2.ckpt"
+    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241222_1528_TFLOP_base/checkpoints/TFLOP_base_epoch=4.ckpt"
     # resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241211_1551_TFLOP_tiny/checkpoints/TFLOP_epoch=130.ckpt"
     
     # Data
@@ -66,7 +66,7 @@ class TrainingConfig:
     gpu_id: int = 1  # 기본 GPU ID (단일 GPU 사용시)
     devices: list = None  # for multi-GPU
     accelerator: str = "gpu"
-    strategy: str = "ddp"  # 미사용 파라미터 감지 활성화
+    strategy: str = "ddp_find_unused_parameters_true"  # 미사용 파라미터 감지 활성화
     sync_batchnorm: bool = True  # DDP에서 배치 정규화 동기화
     replace_sampler_ddp: bool = True  # DDP에서 샘플러 자동 교체
     
