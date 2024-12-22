@@ -15,7 +15,8 @@ def collate_fn(batch, tokenizer):
     
     # 1. 기본 데이터 처리
     image_names = [sample['image_name'] for sample in batch]
-    images = torch.cat([sample['image']['pixel_values'] for sample in batch], dim=0)
+    images = [sample['image'] for sample in batch]
+    # images = torch.cat([sample['image']['pixel_values'] for sample in batch], dim=0)
     num_boxes = torch.tensor([sample['num_boxes'] for sample in batch])
     
     # 2. OTSL 시퀀스 토큰화
