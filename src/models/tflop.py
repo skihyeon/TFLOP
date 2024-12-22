@@ -139,51 +139,72 @@ class TFLOP(nn.Module):
         }
         
     def _eval_forward(self, batch, visual_features, layout_prompt):
+        """검증/추론 모드에서의 forward path (greedy decoding)"""
         batch_size = layout_prompt.size(0)
         
         # 초기 입력 설정
-        curr_ids = torch.full(
-            (batch_size, 1),
-            self.tokenizer.bos_token_id,
-            dtype=torch.long,
-            device=layout_prompt.device
-        )
+        bos_ids = torch.full((batch_size, 1), self.tokenizer.bos_token_id, device=layout_prompt.device)
+        bos_embeds = self.bart.model.decoder.embed_tokens(bos_ids)
+        current_embeds = torch.cat([layout_prompt, bos_embeds], dim=1)
         
-        prompt_length = layout_prompt.size(1)
-
+        generated_ids = []
+        attention_mask = torch.ones(batch_size, current_embeds.size(1), device=layout_prompt.device)
+        
         # Greedy decoding
-        for step in range(self.tokenizer.otsl_sequence_length - 1):
-            curr_length = curr_ids.size(1)
-            attention_mask = torch.ones(
-                    (batch_size, prompt_length + curr_length),
-                    dtype=torch.bool,
-                    device=layout_prompt.device
-                )
-
-            token_embeds = self.bart.model.decoder.embed_tokens(curr_ids)
-            prompt_inputs = torch.cat([layout_prompt, token_embeds], dim=1)
-
-            decoder_outputs = self.bart.model.decoder(
-                inputs_embeds=prompt_inputs,
-                attention_mask=attention_mask,
+        for step in range(self.tokenizer.otsl_sequence_length):
+            outputs = self.bart(
+                inputs_embeds=current_embeds,
                 encoder_hidden_states=visual_features,
+                attention_mask=attention_mask,
                 use_cache=True,
                 output_hidden_states=True,
                 return_dict=True
             )
-
-            last_hidden_state = decoder_outputs.last_hidden_state
-            logits = self.output_projection(last_hidden_state[:, -1:])
-
-            next_token = torch.argmax(logits.squeeze(1), dim=-1, keepdim=True)
-            curr_ids = torch.cat([curr_ids, next_token], dim=1)
-
-        decoder_input_ids = curr_ids
-        token_embeds = self.bart.model.decoder.embed_tokens(decoder_input_ids)
-        prompt_inputs = torch.cat([
-            layout_prompt,
-            token_embeds
-        ], dim=1)
+            
+            next_token_logits = outputs.logits[:, -1, :]
+            
+            # 디버깅: logits 분포 확인
+            if step < 3:  # 처음 3 스텝만 출력
+                print(f"\nStep {step} logits statistics:")
+                print(f"Logits shape: {next_token_logits.shape}")
+                print(f"Logits mean: {next_token_logits.mean().item():.4f}")
+                print(f"Logits std: {next_token_logits.std().item():.4f}")
+                
+                # Top-5 토큰과 확률 출력
+                probs = torch.softmax(next_token_logits, dim=-1)
+                top_probs, top_indices = probs[0].topk(5)
+                print("Top 5 predictions:")
+                for idx, prob in zip(top_indices, top_probs):
+                    token = self.tokenizer.id2token.get(idx.item(), f"UNKNOWN_{idx.item()}")
+                    print(f"Token: {token}, ID: {idx.item()}, Prob: {prob.item():.4f}")
+            
+            # 유효하지 않은 토큰 마스킹
+            invalid_tokens = [self.tokenizer.pad_token_id]  # 필요한 경우 다른 토큰 추가
+            for invalid_id in invalid_tokens:
+                if invalid_id is not None:
+                    next_token_logits[:, invalid_id] = float('-inf')
+            
+            next_token = next_token_logits.argmax(dim=-1)
+            
+            # 디버깅: 생성된 토큰 확인
+            if step < 3:
+                print(f"Generated token at step {step}: {next_token.tolist()}")
+                print(f"Token text: {[self.tokenizer.id2token.get(t.item(), 'UNK') for t in next_token]}")
+            
+            # EOS 토큰 체크
+            if (next_token == self.tokenizer.eos_token_id).any():
+                print(f"EOS token generated at step {step}")
+                break
+            
+            generated_ids.append(next_token)
+            
+            # 다음 스텝 준비
+            next_embeds = self.bart.model.decoder.embed_tokens(next_token.unsqueeze(-1))
+            current_embeds = torch.cat([current_embeds, next_embeds], dim=1)
+            attention_mask = torch.cat([
+                attention_mask,
+                torch.ones(batch_size, 1, device=layout_prompt.device)
+            ], dim=1)
         
         decoder_outputs = self.bart.model.decoder(
             inputs_embeds=prompt_inputs,
