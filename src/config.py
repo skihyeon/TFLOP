@@ -45,8 +45,8 @@ class TrainingConfig:
     use_wandb: bool = False
     
     # Resume training
-    resume_training: bool = False
-    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241220_1832_TFLOP_base/checkpoints/TFLOP_base_epoch=3.ckpt"
+    resume_training: bool = True
+    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241222_1421_TFLOP_base/checkpoints/TFLOP_base_epoch=2.ckpt"
     # resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241211_1551_TFLOP_tiny/checkpoints/TFLOP_epoch=130.ckpt"
     
     # Data
@@ -58,8 +58,8 @@ class TrainingConfig:
     num_epochs: int = 1000
     checkpoint_dir: str = "./checkpoints"
     
-    batch_size: int = 3
-    accumulate_grad_batches: int = 12
+    batch_size: int = 2
+    accumulate_grad_batches: int = 32
     learning_rate: float = 1e-4
     
     # Device & Hardware
@@ -77,12 +77,12 @@ class TrainingConfig:
     precision: str = "32-true"
     gradient_clip_val: float = 1.0
     num_sanity_val_steps: int = 2
-    check_val_every_n_epoch: int = 1
+    check_val_every_n_epoch: int = 5
     
     def __post_init__(self):
         # devices 설정 수정
         if self.devices is None:
-            self.devices = [0]  
+            self.devices = [0,1,2,3]  
         
         # accelerator 설정
         if not torch.cuda.is_available():

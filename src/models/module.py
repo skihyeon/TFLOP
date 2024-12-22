@@ -70,7 +70,6 @@ class TFLOPLightningModule(pl.LightningModule):
         
         # 첫 번째 배치의 첫 번째 샘플에 대해서만 처리
         try:
-            # 배치의 첫 번째 샘플에 대해서만 처리
             for i in range(batch_size):
                 # 예측 토큰과 실제 토큰 디코딩
                 pred_tokens = outputs['tag_logits'][i].argmax(dim=-1)

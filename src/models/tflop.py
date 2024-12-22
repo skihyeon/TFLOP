@@ -36,7 +36,8 @@ class TFLOP(nn.Module):
             is_decoder=True,
             is_encoder_decoder=False,
             add_cross_attention=True,
-            decoder_layers=4,  # Donut의 설정만 가져오기
+            decoder_layers=12, 
+            decoder_attention_heads=16, 
             
             vocab_size=self.tokenizer.vocab_size,
             d_model=self.config.feature_dim,
@@ -48,7 +49,7 @@ class TFLOP(nn.Module):
         )
         
         self.bart = BartForCausalLM(self.bart_config)
-        self.bart.config.is_encoder_decoder = True
+        # self.bart.config.is_encoder_decoder = True
         self.bart.model.decoder.embed_tokens.padding_idx = self.tokenizer.pad_token_id
         
     def other_setup(self):
@@ -108,7 +109,8 @@ class TFLOP(nn.Module):
         tag_embeds = self.bart.model.decoder.embed_tokens(target_tags)
         decoder_inputs = torch.cat([layout_prompt, tag_embeds], dim=1)
         
-        # Prepare labels: [-100 padding | target_tags]
+        # layout prompt 부분은 loss 계산에서 제외 (-100)
+        # 모델은 이 부분을 예측하려 하지 않고, context로만 사용
         label_padding = torch.full(
             (target_tags.size(0), layout_prompt.size(1)),
             fill_value=-100,
@@ -117,12 +119,11 @@ class TFLOP(nn.Module):
         )
         labels = torch.cat([label_padding, target_tags], dim=1)
         
-        # Generate with teacher forcing
         outputs = self.bart(
-            inputs_embeds=decoder_inputs,
+            inputs_embeds=decoder_inputs,  # layout prompt를 입력으로 제공
             encoder_hidden_states=visual_features,
-            attention_mask=torch.ones(layout_prompt.size()[:2], device=layout_prompt.device),
-            labels=labels,
+            attention_mask=torch.ones(decoder_inputs.size()[:2], device=decoder_inputs.device),
+            labels=labels,  # prompt 부분은 -100으로 마스킹하여 loss 계산에서 제외
             output_hidden_states=True,
             return_dict=True
         )
@@ -148,62 +149,43 @@ class TFLOP(nn.Module):
         }
         
     def _eval_forward(self, batch, visual_features, layout_prompt):
-        """검증/추론 모드에서의 forward path (greedy decoding)"""
         batch_size = layout_prompt.size(0)
         
         # 초기 입력 설정
         bos_ids = torch.full((batch_size, 1), self.tokenizer.bos_token_id, device=layout_prompt.device)
         bos_embeds = self.bart.model.decoder.embed_tokens(bos_ids)
         current_embeds = torch.cat([layout_prompt, bos_embeds], dim=1)
-        
-        generated_ids = []
         attention_mask = torch.ones(batch_size, current_embeds.size(1), device=layout_prompt.device)
+        
+        # 생성된 토큰을 저장할 리스트
+        generated_tokens = [bos_ids]
         
         # Greedy decoding
         for step in range(self.tokenizer.otsl_sequence_length):
-            # attention mask 업데이트
             outputs = self.bart(
                 inputs_embeds=current_embeds,
                 encoder_hidden_states=visual_features,
                 attention_mask=attention_mask,
-                use_cache=True,  # 캐시 사용으로 디코딩 속도 향상
+                use_cache=True,
                 output_hidden_states=True,
                 return_dict=True
             )
             
-            # 다음 토큰 예측
-            next_token_logits = outputs.logits[:, -1, :]  # 마지막 위치의 logits만 사용
-            
-            # 디버깅을 위한 로깅
-            if step == 0:
-                print("Initial prediction probabilities:")
-                probs = torch.softmax(next_token_logits, dim=-1)
-                top_probs, top_indices = probs[0].topk(5)
-                for idx, prob in zip(top_indices, top_probs):
-                    print(f"Token: {self.tokenizer.id2token[idx.item()]}, Prob: {prob.item():.4f}")
-            
-            # 불가능한 토큰 마스킹 (선택적)
-            # next_token_logits[:, self.tokenizer.invalid_token_ids] = float('-inf')
-            
+            next_token_logits = outputs.logits[:, -1, :]
             next_token = next_token_logits.argmax(dim=-1)
-            generated_ids.append(next_token)
             
-            # EOS 토큰이 나오면 생성 중단
-            if (next_token == self.tokenizer.eos_token_id).any():
-                break
-                
-            # 다음 스텝을 위한 임베딩 준비
+            # 생성된 토큰 저장
+            generated_tokens.append(next_token.unsqueeze(-1))
             next_embeds = self.bart.model.decoder.embed_tokens(next_token.unsqueeze(-1))
             current_embeds = torch.cat([current_embeds, next_embeds], dim=1)
             attention_mask = torch.cat([
-                attention_mask, 
+                attention_mask,
                 torch.ones(batch_size, 1, device=layout_prompt.device)
             ], dim=1)
         
-        # 생성된 시퀀스 처리
-        generated_ids = torch.stack(generated_ids, dim=1)  # (batch_size, seq_len)
-        
-        # 마지막 hidden states 추출
+        # 생성된 토큰들을 하나의 텐서로 결합
+        generated_ids = torch.cat(generated_tokens, dim=1)
+        # 마지막 hidden states 추출 및 포인터 로직
         last_hidden_state = outputs.hidden_states[-1]
         bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]
         logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]
