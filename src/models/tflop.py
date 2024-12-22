@@ -4,10 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from transformers import BartForCausalLM, BartConfig
-from transformers.file_utils import ModelOutput
-from .custom_swin_encoder import CustomSwinEncoder
-from .custom_bart_decoder import CustomBartDecoder
+from transformers import Swinv2Model, Swinv2Config, BartForCausalLM, BartConfig
+
 from .layout_encoder import LayoutEncoder
 from .layout_pointer import LayoutPointer
 from .otsl_tokenizer import OTSLTokenizer
@@ -25,14 +23,11 @@ class TFLOP(nn.Module):
         self.bart_setup()
     
     def swin_setup(self):
-        self.image_encoder = CustomSwinEncoder(
-            input_size = self.config.image_size,
-            align_long_axis = False,
-            window_size = 8,
-            encoder_layer = [2, 2, 14, 2]
-        )
+        self.swin_config = Swinv2Config.from_pretrained(self.config.swin_model_name)
+        self.swin_config.image_size = self.config.image_size
+        self.image_encoder = Swinv2Model.from_pretrained(self.config.swin_model_name, config=self.swin_config)
         self.visual_proj = nn.Linear(
-            self.image_encoder.feature_dim,
+            self.image_encoder.config.hidden_size,
             self.config.feature_dim
         )
         
@@ -41,7 +36,7 @@ class TFLOP(nn.Module):
             is_decoder=True,
             is_encoder_decoder=False,
             add_cross_attention=True,
-            decoder_layers=4, 
+            decoder_layers=4,  # Donut의 설정만 가져오기
             
             vocab_size=self.tokenizer.vocab_size,
             d_model=self.config.feature_dim,
@@ -50,10 +45,11 @@ class TFLOP(nn.Module):
             pad_token_id=self.tokenizer.pad_token_id,
             bos_token_id=self.tokenizer.bos_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
-            # decoder_start_token_id = self.tokenizer.bos_token_id,
         )
         
-        self.logical_structure_decoder = CustomBartDecoder(self.bart_config)
+        self.bart = BartForCausalLM(self.bart_config)
+        self.bart.config.is_encoder_decoder = True
+        self.bart.model.decoder.embed_tokens.padding_idx = self.tokenizer.pad_token_id
         
     def other_setup(self):
         # Layout Encoder
@@ -90,8 +86,8 @@ class TFLOP(nn.Module):
     
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         # 이미지 인코딩
-        image_tensors = self.image_encoder.prepare_input(batch['images'])
-        visual_features = self.image_encoder(image_tensors)
+        encoder_outputs = self.image_encoder(batch['images'], output_hidden_states=True)
+        visual_features = encoder_outputs.last_hidden_state
         visual_features = F.normalize(visual_features, p=2, dim=-1)
         visual_features = self.visual_proj(visual_features)
 
@@ -108,14 +104,27 @@ class TFLOP(nn.Module):
     def _train_forward(self, batch, visual_features, layout_prompt):
         """Teacher forcing: Use ground truth tags for training"""
         # Prepare inputs: [layout_prompt | target_tags]
-        labels = batch['token_ids']
-        decoder_inputs = layout_prompt
+        target_tags = batch['token_ids']
+        tag_embeds = self.bart.model.decoder.embed_tokens(target_tags)
+        decoder_inputs = torch.cat([layout_prompt, tag_embeds], dim=1)
+        
+        # Prepare labels: [-100 padding | target_tags]
+        label_padding = torch.full(
+            (target_tags.size(0), layout_prompt.size(1)),
+            fill_value=-100,
+            dtype=target_tags.dtype,
+            device=target_tags.device
+        )
+        labels = torch.cat([label_padding, target_tags], dim=1)
         
         # Generate with teacher forcing
-        outputs = self.logical_structure_decoder(
-            input_ids = decoder_inputs, 
-            encoder_hidden_states = visual_features,
-            labels = labels,
+        outputs = self.bart(
+            inputs_embeds=decoder_inputs,
+            encoder_hidden_states=visual_features,
+            attention_mask=torch.ones(layout_prompt.size()[:2], device=layout_prompt.device),
+            labels=labels,
+            output_hidden_states=True,
+            return_dict=True
         )
         
         # Extract features for alignment
@@ -191,15 +200,11 @@ class TFLOP(nn.Module):
                 torch.ones(batch_size, 1, device=layout_prompt.device)
             ], dim=1)
         
-        decoder_outputs = self.bart.model.decoder(
-            inputs_embeds=prompt_inputs,
-            encoder_hidden_states=visual_features,
-            use_cache=False,
-            output_hidden_states=True,
-            return_dict=True
-        )
+        # 생성된 시퀀스 처리
+        generated_ids = torch.stack(generated_ids, dim=1)  # (batch_size, seq_len)
+        
         # 마지막 hidden states 추출
-        last_hidden_state = decoder_outputs.hidden_states[-1]
+        last_hidden_state = outputs.hidden_states[-1]
         bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]
         logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]
         

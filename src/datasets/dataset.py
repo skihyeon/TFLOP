@@ -48,8 +48,8 @@ class TableDataset(Dataset):
         # 고정된 길이 설정
         self.layout_prompt_length = self.config.total_sequence_length - self.config.otsl_max_length
         
-        # self.image_processor = AutoImageProcessor.from_pretrained(ModelConfig.swin_model_name)
-        # self.image_processor.size = (image_size, image_size)
+        self.image_processor = AutoImageProcessor.from_pretrained(ModelConfig.swin_model_name)
+        self.image_processor.size = (image_size, image_size)
         
         # predict 모드가 아닐 때만 annotation 로드
         if not is_predict:
@@ -176,9 +176,9 @@ class TableDataset(Dataset):
             if not os.path.exists(image_path):
                 raise ValueError(f"Image file not found: {image_path}")
             
-            image = Image.open(image_path)
+            image = Image.open(image_path).convert('RGB')
             image_width, image_height = image.size
-            # image = self.image_processor(image, return_tensors="pt")
+            image = self.image_processor(image, return_tensors="pt")
             
             # C 태그 위치 추적
             token_positions = [j for j, token in enumerate(ann['otsl_tokens_list']) if token == 'C']
