@@ -41,12 +41,12 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """학습 설정"""
-    exp_name: str = "TFLOP_base"
+    exp_name: str = "TFLOP_all"
     use_wandb: bool = True
     
     # Resume training
     resume_training: bool = True
-    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241222_1528_TFLOP_base/checkpoints/TFLOP_base_epoch=4.ckpt"
+    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241222_2252_TFLOP_test/checkpoints/TFLOP_test_epoch=5.ckpt"
     # resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241211_1551_TFLOP_tiny/checkpoints/TFLOP_epoch=130.ckpt"
     
     # Data
@@ -58,19 +58,20 @@ class TrainingConfig:
     num_epochs: int = 1000
     checkpoint_dir: str = "./checkpoints"
     
-    batch_size: int = 2
-    accumulate_grad_batches: int = 32
-    learning_rate: float = 1e-4
+    batch_size: int = 3
+    accumulate_grad_batches: int = 7
+    learning_rate: float = 1e-3
     
     # Device & Hardware
     gpu_id: int = 1  # 기본 GPU ID (단일 GPU 사용시)
     devices: list = None  # for multi-GPU
     accelerator: str = "gpu"
-    strategy: str = "ddp_find_unused_parameters_true"  # 미사용 파라미터 감지 활성화
+    # strategy: str = "ddp_find_unused_parameters_true"  # 미사용 파라미터 감지 활성화
+    strategy: str = "ddp"
     sync_batchnorm: bool = True  # DDP에서 배치 정규화 동기화
     replace_sampler_ddp: bool = True  # DDP에서 샘플러 자동 교체
     
-    num_workers: int = 12
+    num_workers: int = 4
     pin_memory: bool = True
     
     # Trainer 설정
@@ -82,7 +83,7 @@ class TrainingConfig:
     def __post_init__(self):
         # devices 설정 수정
         if self.devices is None:
-            self.devices = [0,1,2,3]  
+            self.devices = [1,2,3]  
         
         # accelerator 설정
         if not torch.cuda.is_available():

@@ -34,10 +34,10 @@ class TFLOP(nn.Module):
     def bart_setup(self):
         self.bart_config = BartConfig(
             is_decoder=True,
-            # is_encoder_decoder=False,
+            is_encoder_decoder=False,
             add_cross_attention=True,
-            decoder_layers=12, 
-            decoder_attention_heads=16, 
+            decoder_layers=4, 
+            # decoder_attention_heads=16, 
             
             vocab_size=self.tokenizer.vocab_size,
             d_model=self.config.feature_dim,
@@ -48,10 +48,10 @@ class TFLOP(nn.Module):
             eos_token_id=self.tokenizer.eos_token_id,
         )
         
-        # self.bart = BartForCausalLM(self.bart_config)
-        self.bart = BartModel(self.bart_config)
+        self.bart = BartForCausalLM(self.bart_config)
+        # self.bart = BartModel(self.bart_config)
         # self.bart.config.is_encoder_decoder = True
-        self.bart.decoder.embed_tokens.padding_idx = self.tokenizer.pad_token_id
+        self.bart.model.decoder.embed_tokens.padding_idx = self.tokenizer.pad_token_id
         self.output_projection = nn.Linear(self.config.feature_dim, self.tokenizer.vocab_size)
     def other_setup(self):
         # Layout Encoder
@@ -112,7 +112,7 @@ class TFLOP(nn.Module):
             self.tokenizer.bos_token_id
         )
         
-        token_embeds = self.bart.decoder.embed_tokens(decoder_input_ids)
+        token_embeds = self.bart.model.decoder.embed_tokens(decoder_input_ids)
         prompt_inputs = torch.cat([
             layout_prompt,
             token_embeds
@@ -122,7 +122,7 @@ class TFLOP(nn.Module):
         padding_mask = torch.ones(prompt_inputs.size(0), prompt_inputs.size(1), device=prompt_inputs.device)
         padding_mask[:, layout_prompt.size(1):] = (decoder_input_ids != self.tokenizer.pad_token_id)
         
-        decoder_outputs = self.bart.decoder(
+        decoder_outputs = self.bart.model.decoder(
             inputs_embeds=prompt_inputs,
             attention_mask=padding_mask,  # padding mask만 전달
             encoder_hidden_states=visual_features,
@@ -172,17 +172,18 @@ class TFLOP(nn.Module):
         max_length = self.tokenizer.otsl_sequence_length
         prompt_length = layout_prompt.size(1)
 
-        for step in range(max_length-1):
+        # 토큰 생성 루프
+        for step in range(max_length):
             curr_length = curr_ids.size(1)
             attention_mask = torch.ones(
                     (B, prompt_length + curr_length),
                     dtype=torch.bool,
                     device=layout_prompt.device
                 )           
-            token_embeds = self.bart.decoder.embed_tokens(curr_ids)
+            token_embeds = self.bart.model.decoder.embed_tokens(curr_ids)
             prompt_inputs = torch.cat([layout_prompt, token_embeds], dim=1)          
 
-            decoder_outputs = self.bart.decoder(
+            decoder_outputs = self.bart.model.decoder(
                 inputs_embeds=prompt_inputs,
                 attention_mask=attention_mask,
                 encoder_hidden_states=visual_features,
@@ -195,22 +196,7 @@ class TFLOP(nn.Module):
             next_token = torch.argmax(logits.squeeze(1), dim=-1, keepdim=True)    
             curr_ids = torch.cat([curr_ids, next_token], dim=1)
 
-        decoder_input_ids = curr_ids
-        token_embeds = self.bart.decoder.embed_tokens(decoder_input_ids)
-        prompt_inputs = torch.cat([
-            layout_prompt,
-            token_embeds
-        ], dim=1)
-        
-        decoder_outputs = self.bart.decoder(
-            inputs_embeds=prompt_inputs,
-            encoder_hidden_states=visual_features,
-            use_cache=False,
-            output_hidden_states=True,
-            return_dict=True
-        )
-
-        last_hidden_state = decoder_outputs.last_hidden_state
+        # 마지막 step의 hidden states 사용
         bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]
         logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]  
 
@@ -220,7 +206,6 @@ class TFLOP(nn.Module):
             box_features=bbox_embeddings,
             tag_features=logical_structure_embeddings
         )
-
 
         return {
             'tag_logits': tag_logits,
