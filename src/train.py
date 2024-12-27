@@ -8,7 +8,7 @@ import torch
 from config import ModelConfig, TrainingConfig
 from models import TFLOPLightningModule
 from datasets.datamodule import TableDataModule
-from utils.callbacks import ValidationVisualizationCallback
+from utils.callbacks import ValidationVisualizationCallback, BestModelSaveCallback
 
 
 def main():
@@ -45,7 +45,8 @@ def main():
             save_last=True,  # 마지막 체크포인트는 따로 저장
             # save_weights_only=True  # 모델 가중치만 저장
         ),
-        ValidationVisualizationCallback(viz_dir=exp_dir / "visualizations")
+        ValidationVisualizationCallback(viz_dir=exp_dir / "visualizations"),
+        BestModelSaveCallback()
     ]
     
     if train_config.use_wandb:

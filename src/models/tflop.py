@@ -26,9 +26,11 @@ class TFLOP(nn.Module):
         self.swin_config = Swinv2Config.from_pretrained(self.config.swin_model_name)
         self.swin_config.image_size = self.config.image_size
         self.image_encoder = Swinv2Model.from_pretrained(self.config.swin_model_name, config=self.swin_config)
-        self.visual_proj = nn.Linear(
-            self.image_encoder.config.hidden_size,
-            self.config.feature_dim
+        self.visual_proj = nn.Sequential(
+            nn.Linear(self.image_encoder.config.hidden_size, self.config.feature_dim * 2),
+            nn.GELU(),
+            nn.Linear(self.config.feature_dim * 2, self.config.feature_dim),
+            nn.LayerNorm(self.config.feature_dim)
         )
         
     def bart_setup(self):
@@ -46,6 +48,9 @@ class TFLOP(nn.Module):
             pad_token_id=self.tokenizer.pad_token_id,
             bos_token_id=self.tokenizer.bos_token_id,
             eos_token_id=self.tokenizer.eos_token_id,
+            activation_function='gelu',
+            dropout=0.1,
+            attention_dropout=0.1,
         )
         
         self.bart = BartForCausalLM(self.bart_config)
@@ -68,8 +73,18 @@ class TFLOP(nn.Module):
             feature_dim=self.config.feature_dim,
             temperature=getattr(self.config, 'temperature', 0.1),
         )
-        self.row_span_proj = nn.Linear(self.config.feature_dim, self.config.feature_dim)
-        self.col_span_proj = nn.Linear(self.config.feature_dim, self.config.feature_dim)
+        self.row_span_proj = nn.Sequential(
+            nn.Linear(self.config.feature_dim, self.config.feature_dim * 2),
+            nn.GELU(),
+            nn.Linear(self.config.feature_dim * 2, self.config.feature_dim),
+            nn.LayerNorm(self.config.feature_dim)
+        )
+        self.col_span_proj = nn.Sequential(
+            nn.Linear(self.config.feature_dim, self.config.feature_dim * 2),
+            nn.GELU(),
+            nn.Linear(self.config.feature_dim * 2, self.config.feature_dim),
+            nn.LayerNorm(self.config.feature_dim)
+        )
         
         
     def prepare_layout_prompt(

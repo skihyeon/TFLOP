@@ -133,3 +133,27 @@ class ValidationVisualizationCallback(Callback):
         </body>
         </html>
         """
+
+class BestModelSaveCallback(Callback):
+    def __init__(self):
+        super().__init__()
+        self.best_teds = 0.0
+        
+    def on_validation_epoch_end(
+        self, 
+        trainer: pl.Trainer,
+        pl_module: pl.LightningModule
+    ):
+        current_teds = pl_module.val_teds.compute()
+        
+        if current_teds > self.best_teds:
+            self.best_teds = current_teds
+            save_dir = Path(trainer.checkpoint_callback.dirpath)
+            save_path = save_dir / f"{pl_module.train_config.exp_name}_best.pt"
+            
+            torch.save({
+                'state_dict': pl_module.state_dict(),
+                'model_config': pl_module.model_config.__dict__,
+                'train_config': pl_module.train_config.__dict__,
+                'teds_score': current_teds
+            }, save_path)

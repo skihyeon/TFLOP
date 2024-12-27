@@ -11,11 +11,27 @@ class LayoutPointer(nn.Module):
     """
     def __init__(self, feature_dim: int, temperature: float = 0.1):
         super().__init__()
-        # Box와 Tag를 위한 projection layers
-        self.box_proj = nn.Sequential(nn.Linear(feature_dim, feature_dim))
-        self.tag_proj = nn.Sequential(nn.Linear(feature_dim, feature_dim))
+        # FFN으로 확장하여 표현력 강화
+        self.box_proj = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim * 2),
+            nn.GELU(),
+            nn.Linear(feature_dim * 2, feature_dim),
+            nn.LayerNorm(feature_dim)
+        )
+        self.tag_proj = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim * 2),
+            nn.GELU(),
+            nn.Linear(feature_dim * 2, feature_dim),
+            nn.LayerNorm(feature_dim)
+        )
         
-        # Empty cell을 위한 special embedding (b̄0)
+        # Empty cell embedding도 동일한 구조로
+        self.empty_box_proj = nn.Sequential(
+            nn.Linear(feature_dim, feature_dim * 2),
+            nn.GELU(),
+            nn.Linear(feature_dim * 2, feature_dim),
+            nn.LayerNorm(feature_dim)
+        )
         self.empty_box_embedding = nn.Parameter(torch.zeros(1, 1, feature_dim))
 
         self.temperature = temperature
@@ -56,7 +72,7 @@ class LayoutPointer(nn.Module):
         pointer_logits = torch.matmul(box_proj, tag_proj.transpose(-2, -1))  # (B, 994, 30)
         
         # 4. Compute empty pointer logits (raw scores)
-        empty_box_proj = F.normalize(self.box_proj(self.empty_box_embedding), p=2, dim=-1)  # (1, 1, D)
+        empty_box_proj = F.normalize(self.empty_box_proj(self.empty_box_embedding), p=2, dim=-1)  # (1, 1, D)
         empty_pointer_logits = torch.matmul(
             empty_box_proj.expand(B, -1, -1),  # (B, 1, D)
             tag_proj.transpose(-2, -1)  # (B, D, 30)

@@ -10,11 +10,15 @@ import math
 import matplotlib.pyplot as plt
 from pathlib import Path
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import json
 
 class TFLOPLightningModule(pl.LightningModule):
     def __init__(self, model_config: Any, train_config: Any):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters({
+            "config": model_config.__dict__,
+            "train_config": train_config.__dict__
+        })
         self.model_config = model_config
         self.train_config = train_config
         # Model components
