@@ -8,7 +8,7 @@ import torch
 from config import ModelConfig, TrainingConfig
 from models import TFLOPLightningModule
 from datasets.datamodule import TableDataModule
-from utils.callbacks import ValidationVisualizationCallback
+from utils.callbacks import ValidationVisualizationCallback, BestModelSaveCallback
 
 
 def main():
@@ -23,6 +23,9 @@ def main():
     else:
         exp_dir = Path(train_config.checkpoint_dir) / (timestamp + "_" + train_config.exp_name)
         exp_dir.mkdir(parents=True, exist_ok=True)
+        (exp_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+        (exp_dir / "step_checkpoints").mkdir(parents=True, exist_ok=True)
+        (exp_dir / "visualizations").mkdir(parents=True, exist_ok=True)
     
     datamodule = TableDataModule(
         data_dir=train_config.data_dir,
@@ -33,20 +36,26 @@ def main():
     model = TFLOPLightningModule(
         model_config=model_config,
         train_config=train_config,
-        inference_mode=False
     )
     
     callbacks = [
         ModelCheckpoint(
             dirpath=exp_dir / "checkpoints",
             filename=f'{train_config.exp_name}' + '_{epoch}',
-            save_top_k=-1,  # 모든 체크포인트 저장
-            every_n_epochs=1,  # 매 epoch마다 저장
+            save_top_k=-1,
+            every_n_epochs=1,
             save_on_train_epoch_end=True,
-            save_last=True,  # 마지막 체크포인트는 따로 저장
-            # save_weights_only=True  # 모델 가중치만 저장
+            save_last=True,
         ),
-        ValidationVisualizationCallback(viz_dir=exp_dir / "visualizations")
+        ModelCheckpoint(
+            dirpath=exp_dir / "step_checkpoints",
+            filename=f'{train_config.exp_name}' + '_{step}',
+            save_top_k=3,
+            every_n_train_steps=5000,
+            monitor='train/loss'
+        ),
+        ValidationVisualizationCallback(viz_dir=exp_dir / "visualizations"),
+        BestModelSaveCallback(save_dir=exp_dir / "checkpoints")
     ]
     
     if train_config.use_wandb:
@@ -58,7 +67,7 @@ def main():
                 "train_config": train_config.to_dict()
             }
         )
-        callbacks.append(LearningRateMonitor(logging_interval='epoch'))
+        callbacks.append(LearningRateMonitor(logging_interval='step'))
     else:
         logger = False
     

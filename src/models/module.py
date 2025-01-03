@@ -1,26 +1,32 @@
-import pytorch_lightning as pl
+from typing import Any, Dict
+
 import torch
-from typing import Dict, Any
+import pytorch_lightning as pl
+import torchmetrics
+from torch.optim import lr_scheduler
+
 from .tflop import TFLOP
 from .losses import TFLOPLoss
-from metrics.teds import compute_teds, compute_teds_struct
+from metrics.teds import compute_teds, compute_teds_struct, compute_teds_both
 from utils.util import construct_table_html_pred, construct_table_html_gt
-import torchmetrics
-import math
-import matplotlib.pyplot as plt
-from pathlib import Path
-from torch.optim.lr_scheduler import ReduceLROnPlateau
+from metrics.teds import teds_calculator
 
 class TFLOPLightningModule(pl.LightningModule):
-    def __init__(self, model_config: Any, train_config: Any, inference_mode: bool = False):
+    def __init__(self, model_config: Any, train_config: Any):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters({
+            "config": model_config.__dict__,
+            "train_config": train_config.__dict__
+        })
         self.model_config = model_config
         self.train_config = train_config
-        self.inference_mode = inference_mode
-
+        
+        # 메모리 관리 설정
+        self.automatic_optimization = True
+        torch.backends.cudnn.benchmark = True
+        
         # Model components
-        self.model = TFLOP(model_config, inference_mode)
+        self.model = TFLOP(model_config)
         self.criterion = TFLOPLoss(
             lambda_cls=model_config.lambda_cls,
             lambda_ptr=model_config.lambda_ptr,
@@ -39,110 +45,135 @@ class TFLOPLightningModule(pl.LightningModule):
         return self.model(batch)
         
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
-        outputs = self(batch)
-        loss_dict = self.criterion(batch, outputs)
-        # Loss logging (step과 epoch 단위로 분리)
+        # 메모리 최적화를 위한 context manager 사용
+        with torch.cuda.amp.autocast(enabled=True):
+            outputs = self(batch)
+            loss_dict = self.criterion(batch, outputs)
+        
+        # 스텝 단위 로깅 추가
+        self.log('step', self.global_step, prog_bar=False)
         for name, value in loss_dict.items():
-            # Epoch 단위 로깅
+            self.log(f"train/step_{name.replace('_loss', '')}", value,
+                    on_step=True, on_epoch=False, prog_bar=True)
+        
+        # 메모리 정리
+        del outputs
+        torch.cuda.empty_cache()
+        
+        batch_size = batch['images'].size(0)
+        
+        # Loss logging
+        for name, value in loss_dict.items():
+            # Step 단위 로깅 (train_step/...)
+            # self.log(f"train_step/{name.replace('_loss', '')}", value,
+            #         batch_size=batch_size,
+            #         on_step=True,
+            #         on_epoch=False,
+            #         prog_bar=False,
+            #         sync_dist=True)
+            
+            # Epoch 단위 로깅 (train/...)
             self.log(f"train/{name.replace('_loss', '')}", value,
-                    batch_size=batch['images'].size(0),
+                    batch_size=batch_size,
                     on_step=False,
                     on_epoch=True,
                     prog_bar=True,
                     sync_dist=True)
         
+        # CUDA 동기화 추가
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         
         return loss_dict
         
+    @torch.no_grad()
     def validation_step(self, batch, batch_idx):
-        outputs = self(batch)
-        loss_dict = self.criterion(batch, outputs)
-        batch_size = batch['images'].size(0)
-        
-        # Loss logging
-        for name, value in loss_dict.items():
-            self.log(f"val/{name}", value, 
-                    batch_size=batch_size,
-                    on_step=False,
-                    on_epoch=True,
-                    prog_bar=(name == 'loss'),
-                    sync_dist=True)
-        
+        if batch_idx % 1000 == 0:  # 메모리 주기적 정리
+            torch.cuda.empty_cache()
+            
+        with torch.cuda.amp.autocast(enabled=True):
+            outputs = self(batch)
+            loss_dict = self.criterion(batch, outputs)
+            
+        # 배치당 하나의 샘플만 상세 평가 (첫 번째 샘플)
         visualization_outputs = {}
-        
-        # 첫 번째 배치의 첫 번째 샘플에 대해서만 처리
         try:
-            # 배치의 첫 번째 샘플에 대해서만 처리
-            for i in range(batch_size):
-                # 예측 토큰과 실제 토큰 디코딩
-                pred_tokens = outputs['tag_logits'][i].argmax(dim=-1)
-                true_tokens = batch['token_ids'][i]
-                
-                # 패딩된 부분 제거
-                pred_tokens = pred_tokens[pred_tokens != self.model.tokenizer.pad_token_id]
-                true_tokens = true_tokens[true_tokens != self.model.tokenizer.pad_token_id]
-                
-                # OTSL 문자열로 변환
-                pred_otsl = self.model.tokenizer.decode(pred_tokens.cpu().tolist())
-                true_otsl = self.model.tokenizer.decode(true_tokens.cpu().tolist())
-                
-                # 토큰 분포 로깅
-                log_text = self._print_token_distribution(pred_tokens, true_tokens)
+            # 전체 배치에 대한 TEDS 계산 (병렬)
+            pred_tokens_batch = outputs['tag_logits'].argmax(dim=-1)
+            true_tokens_batch = batch['token_ids']
+            
+            # 패딩 마스크 생성 (배치 전체)
+            pad_mask = pred_tokens_batch != self.model.tokenizer.pad_token_id
+            
+            # 배치의 첫 번째 샘플에 대해서만 상세 로깅
+            i = 0
+            pred_tokens = pred_tokens_batch[i][pad_mask[i]]
+            true_tokens = true_tokens_batch[i][true_tokens_batch[i] != self.model.tokenizer.pad_token_id]
+            
+            # OTSL 문자열로 변환
+            pred_otsl = self.model.tokenizer.decode(pred_tokens.cpu().tolist())
+            true_otsl = self.model.tokenizer.decode(true_tokens.cpu().tolist())
+            
+            # 토큰 분포 로깅 (첫 번째 샘플만)
+            log_text = self._print_token_distribution(pred_tokens, true_tokens)
 
-                # HTML 생성
-                bbox_with_text = batch['bbox_with_text'][i]
-                try:
-                    pred_html = construct_table_html_pred(
-                        pred_otsl,
-                        bbox_with_text,
-                        outputs['pointer_logits'][i] / self.model.config.temperature
-                    )
-                    true_html = construct_table_html_gt(batch['html'][i])
-                    
-                    # TEDS 계산
-                    teds = compute_teds(pred_html, true_html)
-                    teds_struct = compute_teds_struct(pred_html, true_html)
-                    print(f"pred_otsl: {pred_otsl}")
-                    print(f"true_otsl: {true_otsl}")
-                    print(f"teds: {teds}, teds_struct: {teds_struct}")
-                    self.val_teds.update(teds)
-                    self.val_teds_struct.update(teds_struct)
-                    
-                    self.log("val/teds", teds, 
-                            on_epoch=True, 
-                            prog_bar=True, 
-                            batch_size=batch_size,
-                            sync_dist=True)
-                    self.log("val/teds_struct", teds_struct, 
-                            on_epoch=True, 
-                            prog_bar=True, 
-                            batch_size=batch_size,
-                            sync_dist=True)
-                    
-                except Exception as e:
-                    teds = 0.0
-                    teds_struct = 0.0
-                    pred_html = ""
-                    true_html = ""
+            # HTML 생성 (첫 번째 샘플만)
+            bbox_with_text = batch['bbox_with_text'][i]
+            try:
+                pred_html = construct_table_html_pred(
+                    pred_otsl,
+                    bbox_with_text,
+                    outputs['pointer_logits'][i] / self.model.config.temperature
+                )
+                true_html = construct_table_html_gt(batch['html'][i])
                 
-                # 시각화용 출력 저장
-                visualization_outputs = {
-                    'image_name': batch['image_names'][i],
-                    'pred_html': pred_html,
-                    'true_html': true_html,
-                    'pred_otsl': pred_otsl,
-                    'true_otsl': true_otsl,
-                    'pointer_logits': outputs['pointer_logits'][i],
-                    'empty_pointer_logits': outputs['empty_pointer_logits'][i],
-                    'teds': teds,
-                    'teds_s': teds_struct,
-                    'log_text': log_text
-                }
-        
+                # 한 번의 호출로 두 메트릭 모두 계산
+                teds, teds_struct = compute_teds_both(pred_html, true_html)
+                
+                # 메트릭 업데이트
+                self.val_teds.update(teds)
+                self.val_teds_struct.update(teds_struct)
+                
+                self.log("val/teds", teds, 
+                        on_epoch=True, 
+                        prog_bar=True, 
+                        batch_size=batch['images'].size(0),
+                        sync_dist=True)
+                self.log("val/teds_struct", teds_struct, 
+                        on_epoch=True, 
+                        prog_bar=True, 
+                        batch_size=batch['images'].size(0),
+                        sync_dist=True)
+                
+            except Exception as e:
+                teds = 0.0
+                teds_struct = 0.0
+                pred_html = ""
+                true_html = ""
+            
+            # 시각화용 출력 저장 (첫 번째 샘플만)
+            visualization_outputs = {
+                'image_name': batch['image_names'][i],
+                'pred_html': pred_html,
+                'true_html': true_html,
+                'pred_otsl': pred_otsl,
+                'true_otsl': true_otsl,
+                'pointer_logits': outputs['pointer_logits'][i],
+                'empty_pointer_logits': outputs['empty_pointer_logits'][i],
+                'teds': teds,
+                'teds_s': teds_struct,
+                'log_text': log_text
+            }
+            
+            # 중간 결과물 즉시 제거
+            del pred_tokens, pred_tokens_batch
+            
         except Exception as e:
             print(f"검증 단계 처리 중 오류 발생: {str(e)}")
-            self.val_teds.update(0.0)
-            self.val_teds_struct.update(0.0)
+            
+        # 큰 출력값들 제거
+        del outputs
+        torch.cuda.empty_cache()
         
         return {**loss_dict, **visualization_outputs}
 
@@ -173,21 +204,24 @@ class TFLOPLightningModule(pl.LightningModule):
             weight_decay=0.01
         )
         
-        scheduler = ReduceLROnPlateau(
+        scheduler = lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer,
-            mode='min',
-            factor=0.5,  # lr을 절반으로 감소
-            patience=5,   # 5 에폭동안 개선이 없으면 lr 감소
-            verbose=True,
-            min_lr=1e-6  # 최소 lr
+            T_0=1000,  # 초기 주기 (스텝 단위)
+            T_mult=1, 
+            eta_min=1e-10
         )
+        
+        # 옵티마이저 상태 메모리 최적화
+        for state in optimizer.state.values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.cuda()
         
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
                 "scheduler": scheduler,
-                "monitor": "val/loss",  # validation loss 기준
-                "interval": "epoch",    # epoch 단위로 업데이트
+                "interval": "step",  # epoch에서 step으로 변경
                 "frequency": 1
             }
         }
@@ -198,17 +232,10 @@ class TFLOPLightningModule(pl.LightningModule):
         loss_dict = self.criterion(batch, outputs)
         batch_size = batch['images'].size(0)
         
-        # Loss logging
-        loss_order = ['loss', 'cls_loss', 'ptr_loss', 'empty_ptr_loss']
-        # for name in loss_order:
-        #     if name in loss_dict:
-        #         self.log(f"test/{name}", loss_dict[name],
-        #                 batch_size=batch_size,
-        #                 on_step=False,
-        #                 on_epoch=True,
-        #                 sync_dist=True)
+        # 배치 단위로 TEDS 계산
+        pred_htmls = []
+        true_htmls = []
         
-        # TEDS 계산
         for i in range(batch_size):
             pred_tokens = outputs['tag_logits'][i].argmax(dim=-1)
             pred_tokens = pred_tokens[pred_tokens != self.model.tokenizer.pad_token_id]
@@ -222,20 +249,32 @@ class TFLOPLightningModule(pl.LightningModule):
                 )
                 true_html = construct_table_html_gt(batch['html'][i])
                 
-                teds = compute_teds(pred_html, true_html)
-                teds_struct = compute_teds_struct(pred_html, true_html)
-                
-                self.log("test/teds", teds, 
-                        on_epoch=True, 
-                        batch_size=batch_size,
-                        sync_dist=True)
-                self.log("test/teds_struct", teds_struct, 
-                        on_epoch=True, 
-                        batch_size=batch_size,
-                        sync_dist=True)
+                pred_htmls.append(pred_html)
+                true_htmls.append(true_html)
                 
             except Exception as e:
                 print(f"Error in test_step: {str(e)}")
+                pred_htmls.append("")
+                true_htmls.append("")
+        
+        # 배치 단위로 TEDS와 TEDS-struct 동시 계산
+        teds_scores = []
+        teds_struct_scores = []
+        
+        for pred_html, true_html in zip(pred_htmls, true_htmls):
+            teds, teds_struct = compute_teds_both(pred_html, true_html)
+            teds_scores.append(teds)
+            teds_struct_scores.append(teds_struct)
+        
+        # 평균 TEDS 점수 로깅
+        self.log("test/teds", sum(teds_scores) / len(teds_scores), 
+                on_epoch=True, 
+                batch_size=batch_size,
+                sync_dist=True)
+        self.log("test/teds_struct", sum(teds_struct_scores) / len(teds_struct_scores), 
+                on_epoch=True, 
+                batch_size=batch_size,
+                sync_dist=True)
         
         return loss_dict
     
@@ -274,3 +313,11 @@ class TFLOPLightningModule(pl.LightningModule):
             })
         
         return predictions
+
+    def on_train_epoch_end(self):
+        # 에폭 종료시 메모리 정리
+        torch.cuda.empty_cache()
+        
+    def on_validation_epoch_end(self):
+        # 검증 종료시 메모리 정리
+        torch.cuda.empty_cache()

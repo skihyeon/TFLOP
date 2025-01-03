@@ -28,10 +28,9 @@ class OTSLTokenizer:
     """
     def __init__(
         self,
-        otsl_sequence_length: int = 30,  # 논문 4.2 Experimental Settings
-        pad_token: str = "[PAD]",
-        unk_token: str = "[UNK]",
+        otsl_sequence_length: int,  # 논문 4.2 Experimental Settings
         bos_token: str = "[BOS]",
+        pad_token: str = "[PAD]",
         eos_token: str = "[EOS]",
     ):
         # 기본 설정
@@ -39,9 +38,8 @@ class OTSLTokenizer:
         
         # Special tokens
         self.special_tokens = {
-            "pad_token": pad_token,
-            "unk_token": unk_token,
             "bos_token": bos_token,
+            "pad_token": pad_token,
             "eos_token": eos_token,
         }
         
@@ -69,14 +67,12 @@ class OTSLTokenizer:
         self.vocab_size = len(self.token2id)
         
         # Special token IDs
-        self.pad_token_id = self.token2id[pad_token]
-        self.unk_token_id = self.token2id[unk_token]
         self.bos_token_id = self.token2id[bos_token]
+        self.pad_token_id = self.token2id[pad_token]
         self.eos_token_id = self.token2id[eos_token]
         
         # Special token attributes
         self.pad_token = pad_token
-        self.unk_token = unk_token
         self.bos_token = bos_token
         self.eos_token = eos_token
         
@@ -87,7 +83,7 @@ class OTSLTokenizer:
         self.x_token_id = self.token2id["X"]
         self.nl_token_id = self.token2id["NL"]
 
-        self.otsl_token_ids = [self.pad_token_id, self.unk_token_id, self.bos_token_id, self.eos_token_id,
+        self.otsl_token_ids = [self.bos_token_id, self.pad_token_id, self.eos_token_id,
                               self.c_token_id, self.l_token_id, self.u_token_id,
                               self.x_token_id, self.nl_token_id]
     
@@ -173,9 +169,7 @@ class OTSLTokenizer:
         for token in tokens:
             if token in self.token2id:
                 token_ids.append(self.token2id[token])
-            else:
-                token_ids.append(self.unk_token_id)
-                
+
         # Add EOS token
         if add_special_tokens:
             token_ids.append(self.eos_token_id)
@@ -205,15 +199,12 @@ class OTSLTokenizer:
         for token_id in token_ids:
             # Skip special tokens if requested
             if skip_special_tokens:
-                if token_id in [self.pad_token_id, self.unk_token_id,
-                                self.bos_token_id, self.eos_token_id]:
+                if token_id in [self.pad_token_id, self.bos_token_id, self.eos_token_id]:
                     continue
                     
             # Convert token ID to text
             if token_id in self.id2token:
                 tokens.append(self.id2token[token_id])
-            else:
-                tokens.append(self.unk_token)
                 
         # Join tokens
         text = " ".join(tokens)

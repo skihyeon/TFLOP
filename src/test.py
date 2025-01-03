@@ -16,7 +16,14 @@ def main():
     model_config = ModelConfig()
     train_config = TrainingConfig()
     
-    # 1. 토크나이저 초기화
+    # 1. GPU 설정 명시
+    if torch.cuda.is_available():
+        torch.cuda.set_device(train_config.gpu_id)
+        device = torch.device(f'cuda:{train_config.gpu_id}')
+    else:
+        device = torch.device('cpu')
+    
+    # 2. 토크나이저 초기화
     tokenizer = OTSLTokenizer(
         otsl_sequence_length=model_config.otsl_max_length
     )
@@ -38,24 +45,22 @@ def main():
         shuffle=False,
         num_workers=train_config.num_workers,
         pin_memory=train_config.pin_memory,
-        use_length_sampler=False,
         drop_last=False
     )
     
-    # 4. 체크포인트에서 모델 로드
+    # 4. 체크포인트에서 모델 로드 및 GPU 설정
     model = TFLOPLightningModule.load_from_checkpoint(
         train_config.resume_checkpoint_path,
         model_config=model_config,
         train_config=train_config,
-        inference_mode=True
     )
-    model.to(torch.device(f'cuda:{train_config.gpu_id}'))
+    model = model.to(device)
     
     # 5. 테스트를 위한 Trainer 설정
     trainer = pl.Trainer(
-        accelerator=train_config.accelerator,
-        devices=[3],
-        strategy=train_config.strategy,
+        accelerator='gpu',  # 명시적으로 GPU 설정
+        devices=[train_config.gpu_id],
+        # strategy='single_device',
         precision=train_config.precision,
         logger=False,
         enable_checkpointing=False,
@@ -91,4 +96,7 @@ def main():
 if __name__ == "__main__":
     pl.seed_everything(42)
     torch.set_float32_matmul_precision('high')
+
+    config = TrainingConfig()
+    torch.cuda.set_device(config.gpu_id)  # 명시적으로 GPU 설정
     main()
