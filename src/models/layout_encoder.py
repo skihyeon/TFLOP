@@ -45,22 +45,21 @@ class LayoutEncoder(nn.Module):
     def forward(self, bboxes: torch.Tensor, visual_features: torch.Tensor) -> torch.Tensor:
         B, N = bboxes.size()[:2]
         
-        # 1. Encode bounding boxes through MLP
-        bbox_feats = self.bbox_encoder(bboxes)  # (B, N, D)
+        # 1. Bbox encoding
+        bbox_feats = self.bbox_encoder(bboxes)  # (B, N, feature_dim)
         
-        # 2. Extract and encode ROI features
-        # visual_features: (B, D, H, W) where D is feature_dim
+        # 2. ROI features with spatial information preserved
         visual_feats = visual_features.view(B, self.feature_dim, self.input_size//32, self.input_size//32)
-        
         rois = self.prepare_rois(bboxes)
-        roi_feats = self.roi_align(visual_feats, rois)  # (B*N, D, 2, 2)
-        roi_feats = roi_feats.flatten(1)  # (B*N, D*4)
-        roi_feats = self.roi_mlp(roi_feats)  # (B*N, D)
-        roi_feats = roi_feats.view(B, N, -1)  # (B, N, D)
+        roi_feats = self.roi_align(visual_feats, rois)  # (B*N, feature_dim, 2, 2)
         
-        # 3. Aggregate bbox and ROI features
-        combined_feats = torch.cat([bbox_feats, roi_feats], dim=-1)  # (B, N, 2D)
-        layout_embedding = self.aggregate(combined_feats)  # (B, N, D)
+        # Preserve spatial structure while processing
+        roi_feats = roi_feats.view(B, N, self.feature_dim, 4)  # (B, N, feature_dim, 4)
+        roi_feats = self.roi_mlp(roi_feats.flatten(-2))  # (B, N, feature_dim)
+        
+        # 3. Combine features
+        combined_feats = torch.cat([bbox_feats, roi_feats], dim=-1)
+        layout_embedding = self.aggregate(combined_feats)
         
         return layout_embedding
     

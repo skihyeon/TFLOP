@@ -16,8 +16,8 @@ class ModelConfig:
     feature_dim: int = 1024      # 모델의 hidden dimension 크기       # 논문 1024
     total_sequence_length: int = 1376  # 최대 시퀀스(토큰) 길이        # 논문 1376 # bart position embedding최대 길이 1024
     otsl_max_length: int = 200
-    image_size: int = 768  
-    # swin_model_name: str = "microsoft/swin-base-patch4-window7-224"
+    image_size: int = 768
+    # swin_model_name: str = "microsoft/swin-tiny-patch4-window7-224"
     swin_model_name: str = "microsoft/swinv2-base-patch4-window8-256"
     
     
@@ -41,12 +41,12 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """학습 설정"""
-    exp_name: str = "TFLOP_lm_mixed"
-    use_wandb: bool = True
+    exp_name: str = "TFLOP_eos_test"
+    use_wandb: bool = False
     
     # Resume training
     resume_training: bool = True
-    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241223_1529_TFLOP_all/checkpoints/TFLOP_lm_mixed_epoch=81.ckpt"
+    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20250102_2024_TFLOP_32_len200_swinv2/checkpoints/TFLOP_eos_test_epoch=26.ckpt"
     # resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241211_1551_TFLOP_tiny/checkpoints/TFLOP_epoch=130.ckpt"
     
     # Data
@@ -58,8 +58,8 @@ class TrainingConfig:
     num_epochs: int = 1000
     checkpoint_dir: str = "./checkpoints"
     
-    batch_size: int = 1
-    accumulate_grad_batches: int = 8
+    batch_size: int = 4
+    accumulate_grad_batches: int = 4
     learning_rate: float = 1e-4
     
     # Device & Hardware
@@ -71,14 +71,14 @@ class TrainingConfig:
     sync_batchnorm: bool = True  # DDP에서 배치 정규화 동기화
     replace_sampler_ddp: bool = True  # DDP에서 샘플러 자동 교체
     
-    num_workers: int = 8
+    num_workers: int = 4
     pin_memory: bool = True
     
     # Trainer 설정
-    precision: str = "16-mixed"
-    gradient_clip_val: float = 1.0
+    precision: str = "bf16-mixed"
+    gradient_clip_val: float = 0.5
     num_sanity_val_steps: int = 2
-    check_val_every_n_epoch: int = 5
+    check_val_every_n_epoch: int = 4
     
     def __post_init__(self):
         # devices 설정 수정

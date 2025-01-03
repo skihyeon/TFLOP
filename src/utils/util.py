@@ -7,17 +7,27 @@ import torch
 from models.otsl_tokenizer import OTSLTokenizer
 
 def init_wandb(model_config, train_config):
-        """wandb 초기화"""
+    """wandb 초기화"""
+    try:
+        # 기존 wandb 프로세스 정리
+        if wandb.run is not None:
+            wandb.finish()
+            
         wandb.login(key=os.environ.get('WANDB_API_KEY'))
         wandb.init(
-            entity= os.environ.get('WANDB_ENTITY'),
+            entity=os.environ.get('WANDB_ENTITY'),
             project="TFLOP",
             name=datetime.now().strftime('%Y%m%d_%H%M%S'),
             config={
                 "model_config": model_config.__dict__,
                 "train_config": train_config.__dict__
             },
+            settings=wandb.Settings(start_method="fork")  # 프로세스 관리 방식 변경
         )
+    except Exception as e:
+        print(f"Warning: Failed to initialize wandb: {e}")
+        return None
+
 def extract_spans_from_html(html_structure: Dict) -> Tuple[List[Dict], np.ndarray, np.ndarray]:
     """HTML 구조에서 span 정보 추출"""
     tokens = html_structure['tokens']
@@ -590,75 +600,49 @@ def compute_span_coefficients(row_span_matrix: np.ndarray, col_span_matrix: np.n
     
     return row_coef, col_coef
 
-# def compute_span_coefficients(row_span_matrix: np.ndarray, col_span_matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-#     rows, cols = row_span_matrix.shape
-#     real_cols = cols - 1  # NL 태그 제외
-    
-#     row_coef = np.full((rows, real_cols, rows, real_cols), -1.0)  # invalid pair는 -1
-#     col_coef = np.full((rows, real_cols, rows, real_cols), -1.0)
-    
-#     for i in range(rows):
-#         for j in range(real_cols):
-#             for p in range(rows):
-#                 for q in range(real_cols):
-#                     # Row-wise: 같은 행이거나 span overlap이 있는 경우
-#                     span_i_row = row_span_matrix[i,j]
-#                     span_p_row = row_span_matrix[p,q]
-#                     if min(i + span_i_row, p + span_p_row) > max(i, p):
-#                         overlap = min(i + span_i_row, p + span_p_row) - max(i, p)
-#                         row_coef[i,j,p,q] = overlap / (span_i_row * span_p_row)
-                    
-#                     # Column-wise: 같은 열이거나 span overlap이 있는 경우
-#                     span_i_col = col_span_matrix[i,j]
-#                     span_p_col = col_span_matrix[p,q]
-#                     if min(j + span_i_col, q + span_p_col) > max(j, q):
-#                         overlap = min(j + span_i_col, q + span_p_col) - max(j, q)
-#                         col_coef[i,j,p,q] = overlap / (span_i_col * span_p_col)
-    
-#     return row_coef, col_coef
 
 def pad_coef_matrix(coef: np.ndarray, target_size: int) -> torch.Tensor:
     rows, cols, _, _ = coef.shape
-    # -1 대신 0으로 패딩 (valid pair는 0 이상)
-    padded = torch.zeros((target_size, target_size))
+    padded = torch.zeros((target_size, target_size), dtype=torch.float32)
     
-    for i in range(rows):
-        for j in range(cols):
-            for p in range(rows):
-                for q in range(cols):
-                    # 모든 valid pair 복사 (음수가 아닌 경우)
-                    if coef[i,j,p,q] >= 0:
-                        idx1 = i * cols + j
-                        idx2 = p * cols + q
-                        padded[idx1, idx2] = coef[i,j,p,q]
+    # 1. Reshape coef matrix to 2D
+    coef_2d = coef.reshape(rows * cols, rows * cols)
+    
+    # 2. Create valid mask and get indices
+    valid_mask = coef_2d >= 0
+    valid_indices = np.nonzero(valid_mask)
+    
+    # 3. Convert to torch tensor with explicit dtype and copy values
+    padded[valid_indices[0], valid_indices[1]] = torch.from_numpy(
+        coef_2d[valid_mask].astype(np.float32)  # numpy dtype을 float32로 변환
+    )
     
     return padded
 
 
 def get_coef_matrix(
-    otsl_tokens: torch.Tensor,  # (B, 688)
+    otsl_tokens: torch.Tensor,  
     tokenizer: OTSLTokenizer,
-    target_size: int,  # layout_prompt_length 
+    target_size: int,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """OTSL 토큰에서 span coefficient matrix 추출"""
     B = otsl_tokens.size(0)
     row_coefs, col_coefs = [], []
+
     for b in range(B):
-        # 1. tensor -> list 변환 및 디코딩
         tokens = otsl_tokens[b].tolist()
         row_span_matrix, col_span_matrix = extract_spans_from_otsl(tokens, tokenizer)
-        row_coef, col_coef = compute_span_coefficients(
-            row_span_matrix=row_span_matrix,
-            col_span_matrix=col_span_matrix
+        
+        row_coefs.append(
+            pad_coef_matrix(
+                compute_span_coefficients(row_span_matrix, col_span_matrix)[0],
+                target_size
+            )
         )
-        row_coef_padded = pad_coef_matrix(row_coef, target_size)
-        col_coef_padded = pad_coef_matrix(col_coef, target_size)
-
-        row_coefs.append(row_coef_padded)
-        col_coefs.append(col_coef_padded)
+        col_coefs.append(
+            pad_coef_matrix(
+                compute_span_coefficients(row_span_matrix, col_span_matrix)[1],
+                target_size
+            )
+        )
     
-    # 5. 배치 단위로 stack
-    row_coefs = torch.stack(row_coefs)  # (B, 688, 688)
-    col_coefs = torch.stack(col_coefs)  # (B, 688, 688)
-    
-    return row_coefs, col_coefs
+    return torch.stack(row_coefs), torch.stack(col_coefs)

@@ -3,8 +3,10 @@ from typing import Dict, Any, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 from transformers import Swinv2Model, Swinv2Config, BartForCausalLM, BartConfig, BartModel
+from transformers import SwinModel, SwinConfig
 from transformers.models.bart.modeling_bart import shift_tokens_right
 from .layout_encoder import LayoutEncoder
 from .layout_pointer import LayoutPointer
@@ -24,8 +26,10 @@ class TFLOP(nn.Module):
     
     def swin_setup(self):
         self.swin_config = Swinv2Config.from_pretrained(self.config.swin_model_name)
+        # self.swin_config = SwinConfig.from_pretrained(self.config.swin_model_name)
         self.swin_config.image_size = self.config.image_size
         self.image_encoder = Swinv2Model.from_pretrained(self.config.swin_model_name, config=self.swin_config)
+        # self.image_encoder = SwinModel.from_pretrained(self.config.swin_model_name, config=self.swin_config)
         self.visual_proj = nn.Sequential(
             nn.Linear(self.image_encoder.config.hidden_size, self.config.feature_dim * 2),
             nn.GELU(),
@@ -39,7 +43,6 @@ class TFLOP(nn.Module):
             is_encoder_decoder=False,
             add_cross_attention=True,
             decoder_layers=4, 
-            # decoder_attention_heads=16, 
             
             vocab_size=self.tokenizer.vocab_size,
             d_model=self.config.feature_dim,
@@ -54,10 +57,9 @@ class TFLOP(nn.Module):
         )
         
         self.bart = BartForCausalLM(self.bart_config)
-        # self.bart = BartModel(self.bart_config)
-        # self.bart.config.is_encoder_decoder = True
-        self.bart.model.decoder.embed_tokens.padding_idx = self.tokenizer.pad_token_id
         self.output_projection = nn.Linear(self.config.feature_dim, self.tokenizer.vocab_size)
+        
+        
     def other_setup(self):
         # Layout Encoder
         self.layout_encoder = LayoutEncoder(
@@ -65,7 +67,7 @@ class TFLOP(nn.Module):
             dropout=getattr(self.config, 'dropout', 0.1),
             input_size=self.config.image_size
         )
-        self.layout_pos_embed = nn.Embedding(self.config.total_sequence_length, self.config.feature_dim)
+        self.layout_pos_embed = nn.Embedding(self.layout_prompt_length, self.config.feature_dim)
         self.prompt_layer_norm = nn.LayerNorm(self.config.feature_dim)
         
         # Layout Pointer
@@ -91,11 +93,16 @@ class TFLOP(nn.Module):
         self,
         layout_embedding: torch.Tensor, 
     ) -> torch.Tensor:
-        B, N, D = layout_embedding.shape      
-
+        B, N, D = layout_embedding.shape
+        
+        # 1. Position embedding
         position_ids = torch.arange(N, device=layout_embedding.device)
-        position_embeddings = self.layout_pos_embed(position_ids) 
+        position_embeddings = self.layout_pos_embed(position_ids)
+        
+        # 2. Combine embeddings
         layout_prompt = layout_embedding + position_embeddings.unsqueeze(0)
+        
+        # 3. Final normalization
         layout_prompt = self.prompt_layer_norm(layout_prompt)
         
         return layout_prompt
@@ -103,10 +110,10 @@ class TFLOP(nn.Module):
     
     def forward(self, batch: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
         # 이미지 인코딩
-        encoder_outputs = self.image_encoder(batch['images'], output_hidden_states=True)
+        encoder_outputs = self.image_encoder(batch['images'])
         visual_features = encoder_outputs.last_hidden_state
-        visual_features = F.normalize(visual_features, p=2, dim=-1)
         visual_features = self.visual_proj(visual_features)
+        visual_features = F.normalize(visual_features, p=2, dim=-1)
 
         # 레이아웃 인코딩
         layout_embedding = self.layout_encoder(batch['bboxes'], visual_features)
@@ -128,10 +135,7 @@ class TFLOP(nn.Module):
         )
         
         token_embeds = self.bart.model.decoder.embed_tokens(decoder_input_ids)
-        prompt_inputs = torch.cat([
-            layout_prompt,
-            token_embeds
-        ], dim=1)
+        prompt_inputs = torch.cat([layout_prompt, token_embeds], dim=1)
         
         # 1. Padding mask 생성
         padding_mask = torch.ones(prompt_inputs.size(0), prompt_inputs.size(1), device=prompt_inputs.device)
@@ -139,16 +143,16 @@ class TFLOP(nn.Module):
         
         decoder_outputs = self.bart.model.decoder(
             inputs_embeds=prompt_inputs,
-            attention_mask=padding_mask,  # padding mask만 전달
+            attention_mask=padding_mask,
             encoder_hidden_states=visual_features,
+            encoder_attention_mask=torch.ones_like(padding_mask[:, :layout_prompt.size(1)]),
             use_cache=False,
-            output_hidden_states=True,
             return_dict=True
         )
         
         last_hidden_state = decoder_outputs.last_hidden_state
-        bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]
-        logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]  
+        bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]  # layout_prompt 부분만
+        logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]  # BOS + sequence + EOS
 
         tag_logits = self.output_projection(logical_structure_embeddings)
         
@@ -178,6 +182,7 @@ class TFLOP(nn.Module):
         
     def _eval_forward(self, batch, visual_features, layout_prompt):
         B = layout_prompt.size(0)
+        # BOS 토큰으로 시작
         curr_ids = torch.full(
                 (B, 1),
                 self.tokenizer.bos_token_id,
@@ -207,13 +212,15 @@ class TFLOP(nn.Module):
                 return_dict=True
             )
             last_hidden_state = decoder_outputs.last_hidden_state
+            
+            # 마지막 hidden state에서 다음 토큰 예측
             logits = self.output_projection(last_hidden_state[:, -1:])    
             next_token = torch.argmax(logits.squeeze(1), dim=-1, keepdim=True)    
             curr_ids = torch.cat([curr_ids, next_token], dim=1)
 
-        # 마지막 step의 hidden states 사용
-        bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]
-        logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]  
+        # 최종 embeddings 추출
+        bbox_embeddings = last_hidden_state[:, :layout_prompt.size(1), :]  # layout_prompt 부분만
+        logical_structure_embeddings = last_hidden_state[:, layout_prompt.size(1):, :]  # BOS + sequence + EOS
 
         tag_logits = self.output_projection(logical_structure_embeddings)
         
@@ -246,8 +253,11 @@ class TFLOP(nn.Module):
         # 3. Compute pairwise similarities
         row_sim_matrix = torch.matmul(row_projected, row_projected.transpose(-2, -1))  # (B, N, N)
         col_sim_matrix = torch.matmul(col_projected, col_projected.transpose(-2, -1))  # (B, N, N)
-        # 5. Set diagonal to zero to exclude self-similarity
-        diag_mask = ~torch.eye(N, device=box_features.device, dtype=torch.bool).unsqueeze(0)
+        
+        # 4. Create diagonal mask
+        diag_mask = ~torch.eye(N, dtype=torch.bool, device=box_features.device).unsqueeze(0)  # (1, N, N)
+        
+        # 5. Apply mask
         row_sim_matrix = row_sim_matrix * diag_mask
         col_sim_matrix = col_sim_matrix * diag_mask
         

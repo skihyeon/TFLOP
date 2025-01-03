@@ -1,7 +1,7 @@
 from pytorch_lightning.callbacks import Callback
 from .visualize import visualize_validation_sample
 import pytorch_lightning as pl
-from typing import Dict
+from typing import Dict, Union
 import torch
 from pathlib import Path
 import json
@@ -135,25 +135,33 @@ class ValidationVisualizationCallback(Callback):
         """
 
 class BestModelSaveCallback(Callback):
-    def __init__(self):
+    def __init__(self, save_dir: Union[str, Path]):
         super().__init__()
         self.best_teds = 0.0
+        self.save_dir = Path(save_dir)
+        self.save_dir.mkdir(parents=True, exist_ok=True)
         
     def on_validation_epoch_end(
         self, 
         trainer: pl.Trainer,
         pl_module: pl.LightningModule
     ):
+        if trainer.sanity_checking:
+            return
+            
         current_teds = pl_module.val_teds.compute()
         
         if current_teds > self.best_teds:
             self.best_teds = current_teds
-            save_dir = Path(trainer.checkpoint_callback.dirpath)
-            save_path = save_dir / f"{pl_module.train_config.exp_name}_best.pt"
+            save_path = self.save_dir / f"{pl_module.train_config.exp_name}_best.pt"
             
-            torch.save({
-                'state_dict': pl_module.state_dict(),
-                'model_config': pl_module.model_config.__dict__,
-                'train_config': pl_module.train_config.__dict__,
-                'teds_score': current_teds
-            }, save_path)
+            try:
+                torch.save({
+                    'state_dict': pl_module.state_dict(),
+                    'model_config': pl_module.model_config.__dict__,
+                    'train_config': pl_module.train_config.__dict__,
+                    'teds_score': current_teds
+                }, save_path)
+                print(f"Saved best model with TEDS score: {current_teds:.4f}")
+            except Exception as e:
+                print(f"Error saving best model: {str(e)}")

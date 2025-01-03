@@ -78,4 +78,19 @@ class LayoutPointer(nn.Module):
             tag_proj.transpose(-2, -1)  # (B, D, 30)
         ).squeeze(1)  # (B, 30)
         
+        # # Debug pointer distributions
+        # print("\n=== Layout Pointer Debug ===")
+        # print(f"Pointer logits range: [{pointer_logits.min():.4f}, {pointer_logits.max():.4f}]")
+        # print(f"Pointer logits mean/std: {pointer_logits.mean():.4f}/{pointer_logits.std():.4f}")
+        
+        # # Empty pointer stats
+        # print(f"Empty pointer range: [{empty_pointer_logits.min():.4f}, {empty_pointer_logits.max():.4f}]")
+        # print(f"Empty pointer mean/std: {empty_pointer_logits.mean():.4f}/{empty_pointer_logits.std():.4f}")
+        
+        # # Attention sparsity check (얼마나 sharp한지)
+        # with torch.no_grad():
+        #     pointer_probs = (pointer_logits / self.temperature).softmax(dim=-1)
+        #     entropy = -(pointer_probs * pointer_probs.log()).sum(dim=-1).mean()
+        #     print(f"Attention entropy: {entropy:.4f}")
+        
         return pointer_logits, empty_pointer_logits
