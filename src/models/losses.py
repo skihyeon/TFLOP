@@ -77,9 +77,15 @@ class TFLOPLoss(nn.Module):
         otsl_mask = (data_tag_mask | empty_tag_mask)[:, self.layout_prompt_length:]
         targets = empty_tag_mask[:, self.layout_prompt_length:]
         
+        # empty cell 비율에 따른 가중치 계산
+        num_empty = (targets * otsl_mask).sum()
+        num_total = otsl_mask.sum()
+        pos_weight = (num_total - num_empty) / (num_empty + 1e-8)
+        
         bce_loss = F.binary_cross_entropy_with_logits(
             empty_logits,
             targets.float(),
+            pos_weight=pos_weight * torch.ones_like(targets),
             reduction='none'
         )
         
@@ -92,36 +98,28 @@ class TFLOPLoss(nn.Module):
     
     def compute_span_aware_contrastive_loss(
             self,
-            sim_matrix: torch.Tensor,  # (B, N, N)
-            span_coef_matrix: torch.Tensor,  # (B, N, N)
+            sim_matrix: torch.Tensor,
+            span_coef_matrix: torch.Tensor,
         ) -> torch.Tensor:
         device = sim_matrix.device
         span_coef_matrix = span_coef_matrix.to(device)
         
-        # Temperature scaling
-        sim_matrix = sim_matrix / self.temperature  # (B, N, N)
+        sim_matrix = sim_matrix / self.temperature
         
-        # 1. Compute exp(sim_matrix/τ) for all pairs
-        exp_sim = torch.exp(sim_matrix)  # (B, N, N)
+        exp_sim = torch.exp(sim_matrix)
         
-        # 2. Compute denominator (sum over all pairs)
-        denominator = exp_sim.sum(dim=-1, keepdim=True)  # (B, N, 1)
+        denominator = exp_sim.sum(dim=-1, keepdim=True)
         
-        # 3. Compute log probabilities
-        log_probs = torch.log(exp_sim / denominator + 1e-8)  # (B, N, N)
+        log_probs = torch.log(exp_sim / denominator + 1e-8)
         
-        # 4. Mask for valid pairs (coef >= 0)
-        valid_mask = (span_coef_matrix >= 0)  # (B, N, N)
+        valid_mask = (span_coef_matrix >= 0)
         
-        # 5. Compute weighted sum of log probs for valid pairs
         weighted_log_probs = span_coef_matrix * log_probs * valid_mask
         
-        # 6. Normalize by sum of coefficients and compute mean
-        coef_sum = span_coef_matrix.sum(dim=-1) + 1e-8  # (B, N)
-        box_losses = -(weighted_log_probs.sum(dim=-1) / coef_sum)  # (B, N)
+        coef_sum = span_coef_matrix.sum(dim=-1) + 1e-8
+        box_losses = -(weighted_log_probs.sum(dim=-1) / coef_sum)
         
-        # 7. Mask out invalid boxes (no positive pairs)
-        valid_boxes = valid_mask.any(dim=-1)  # (B, N)
+        valid_boxes = valid_mask.any(dim=-1)
         final_loss = (box_losses * valid_boxes).sum() / (valid_boxes.sum() + 1e-8)
         
         return final_loss

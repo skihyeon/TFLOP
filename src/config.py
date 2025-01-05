@@ -41,12 +41,12 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """학습 설정"""
-    exp_name: str = "TFLOP_eos_test"
-    use_wandb: bool = False
+    exp_name: str = "TFLOP_len200_bf16"
+    use_wandb: bool = True
     
     # Resume training
-    resume_training: bool = True
-    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20250102_2024_TFLOP_32_len200_swinv2/checkpoints/TFLOP_eos_test_epoch=26.ckpt"
+    resume_training: bool = False
+    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20250103_1656_TFLOP_test/checkpoints/TFLOP_test_epoch=31.ckpt"
     # resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241211_1551_TFLOP_tiny/checkpoints/TFLOP_epoch=130.ckpt"
     
     # Data
@@ -78,12 +78,12 @@ class TrainingConfig:
     precision: str = "bf16-mixed"
     gradient_clip_val: float = 0.5
     num_sanity_val_steps: int = 2
-    check_val_every_n_epoch: int = 4
+    check_val_every_n_epoch: int = 3
     
     def __post_init__(self):
         # devices 설정 수정
         if self.devices is None:
-            self.devices = [2,3]  
+            self.devices = [0,1,2,3]  
         
         # accelerator 설정
         if not torch.cuda.is_available():

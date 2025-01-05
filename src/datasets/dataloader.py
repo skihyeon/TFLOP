@@ -86,7 +86,6 @@ def collate_fn(batch, tokenizer):
                     data_tag_mask[i, mask_pos] = True
                 else:
                     empty_tag_mask[i, mask_pos] = True
-
     return {
         'image_names': image_names,
         'images': images,                      # (B, 3, 768, 768)

@@ -28,95 +28,6 @@ def init_wandb(model_config, train_config):
         print(f"Warning: Failed to initialize wandb: {e}")
         return None
 
-def extract_spans_from_html(html_structure: Dict) -> Tuple[List[Dict], np.ndarray, np.ndarray]:
-    """HTML 구조에서 span 정보 추출"""
-    tokens = html_structure['tokens']
-    
-    # 1. 그리드 크기 계산
-    num_rows = 0
-    num_cols = 0
-    max_cols = 0
-    
-    i = 0
-    in_first_row = False
-    while i < len(tokens):
-        token = tokens[i]
-        if token == '<tr>':
-            num_rows += 1
-            current_cols = 0
-            in_first_row = (num_rows == 1)
-        elif (token == '<td' or token == '<td>') and in_first_row:
-            # colspan 확인
-            colspan = 1
-            if token == '<td':
-                i += 1
-                while i < len(tokens) and tokens[i] != '>':
-                    if 'colspan="' in tokens[i]:
-                        colspan = int(tokens[i].split('"')[1])
-                    i += 1
-            current_cols += colspan
-            max_cols = max(max_cols, current_cols)
-        elif token == '</tr>' and in_first_row:
-            num_cols = max_cols
-            in_first_row = False
-        i += 1
-    
-    # 2. Span 행렬 초기화 - 각 셀의 실제 span 값을 저장
-    row_span_matrix = np.zeros((num_rows, num_cols))  # rowspan 값 저장
-    col_span_matrix = np.zeros((num_rows, num_cols))  # colspan 값 저장
-    
-    # 3. 셀 정보 추출 및 span 행렬 생성
-    processed_cells = []
-    current_row = -1
-    current_col = 0
-    i = 0
-    
-    while i < len(tokens):
-        token = tokens[i]
-        if token == '<tr>':
-            current_row += 1
-            current_col = 0
-        elif token == '<td' or token == '<td>':
-            colspan = 1
-            rowspan = 1
-            
-            # colspan과 rowspan 값 추출
-            if token == '<td':
-                i += 1
-                while i < len(tokens) and tokens[i] != '>':
-                    if 'colspan="' in tokens[i]:
-                        colspan = int(tokens[i].split('"')[1])
-                    elif 'rowspan="' in tokens[i]:
-                        rowspan = int(tokens[i].split('"')[1])
-                    i += 1
-            
-            # 현재 위치 찾기
-            while current_col < num_cols and (
-                row_span_matrix[current_row, current_col] > 0 or 
-                col_span_matrix[current_row, current_col] > 0
-            ):
-                current_col += 1
-                
-            if current_col < num_cols:
-                # 셀 정보 저장
-                cell = {
-                    'row_idx': current_row,
-                    'col_idx': current_col,
-                    'rowspan': rowspan,
-                    'colspan': colspan
-                }
-                processed_cells.append(cell)
-                
-                # Span 정보 저장 - 실제 span 값 사용
-                for r in range(current_row, min(current_row + rowspan, num_rows)):
-                    for c in range(current_col, min(current_col + colspan, num_cols)):
-                        row_span_matrix[r, c] = rowspan
-                        col_span_matrix[r, c] = colspan
-                
-                current_col += colspan
-        i += 1
-    
-    return processed_cells, row_span_matrix, col_span_matrix
 
 def convert_html_to_otsl(ann: Dict) -> Tuple[List[str], List[bool]]:
     if 'html' not in ann or 'structure' not in ann['html'] or 'cells' not in ann['html']:
@@ -355,6 +266,7 @@ def construct_table_html_pred(
     otsl_sequence: str,
     bbox_with_text: List[Dict[str, Union[str, List[float]]]],
     pointer_logits: torch.Tensor,
+    empty_pointer_logits: torch.Tensor = None,
     confidence_threshold: float = 0.5
 ) -> str:
     """OTSL과 pointer logits를 사용하여 예측 테이블 생성"""
@@ -431,17 +343,31 @@ def construct_table_html_pred(
         current_span[0] = max(current_span[0], row - origin_row + 1)
         current_span[1] = max(current_span[1], col - origin_col + 1)
 
-    # 6. pointer_logits를 사용하여 text_cells 매핑 생성
+    # 6. pointer_logits와 empty_pointer_logits를 사용하여 text_cells 매핑 생성
     text_cells = {}  # (row, col) -> List[(box_idx, text, prob)]
-    pointer_probs = torch.softmax(pointer_logits, dim=1)
+    empty_cells = set()  # empty로 판단된 셀들의 (row, col) 집합
     
+    pointer_probs = torch.softmax(pointer_logits, dim=1)
+    empty_probs = torch.sigmoid(empty_pointer_logits) if empty_pointer_logits is not None else None
+
+    # 먼저 empty cell 판단
+    if empty_probs is not None:
+        for token_idx, empty_prob in enumerate(empty_probs):
+            max_empty_prob = empty_prob.max()
+            if max_empty_prob.item() >= confidence_threshold:
+                if token_idx in token_positions:
+                    row, col = token_positions[token_idx]
+                    if row != -1:  # NL 태그가 아닌 경우
+                        empty_cells.add((row, col))
+
+    # 그 다음 text pointer 처리 (empty가 아닌 셀에 대해서만)
     for box_idx in range(pointer_probs.size(0)):
         max_prob, cell_idx = pointer_probs[box_idx].max(dim=0)
         if max_prob.item() >= confidence_threshold and cell_idx < len(token_positions):
             token_idx = cell_idx.item()
             if token_idx in token_positions:
                 row, col = token_positions[token_idx]
-                if row != -1:  # NL 태그가 아닌 경우
+                if row != -1 and (row, col) not in empty_cells:  # empty cell이 아닌 경우에만
                     if box_idx in bbox_with_text:
                         text = bbox_with_text[box_idx]['text']
                         if (row, col) not in text_cells:
@@ -469,12 +395,11 @@ def construct_table_html_pred(
                 
                 cell_tag += ">"
                 
-                if (i, j) in text_cells:
-                    # 해당 셀의 모든 box 처리
+                if (i, j) in empty_cells:
+                    html.append(f"{cell_tag}(empty)</td>")
+                elif (i, j) in text_cells:
                     boxes = text_cells[(i, j)]
-                    # 확률 순으로 정렬
                     boxes.sort(key=lambda x: x[2], reverse=True)
-                    # 모든 텍스트 결합 (공백으로 구분)
                     combined_text = ' '.join(text for _, text, _ in boxes)
                     html.append(f"{cell_tag}{combined_text}</td>")
                 else:

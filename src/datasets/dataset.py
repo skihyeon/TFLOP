@@ -15,8 +15,8 @@ from pathlib import Path
 # 디버그 모드 설정
 DEBUG = True
 DEBUG_SAMPLES = {
-    'train': 20000,
-    'val': 500
+    'train': 200000,
+    'val': 2000
 }
 
 class TableDataset(Dataset):
@@ -95,9 +95,9 @@ class TableDataset(Dataset):
                     num_boxes = len(ann['html']['cells'])
                     otsl_length = len(otsl_tokens_list)
                     
-                    if any(token in otsl_tokens_list for token in ['U', 'L', 'X']):
-                        filtered_count += 1
-                        continue
+                    # if any(token in otsl_tokens_list for token in ['U', 'L', 'X']):
+                    #     filtered_count += 1
+                    #     continue
                     # layout prompt와 otsl sequence 각각의 길이 제한 검증 && otsl sequence에서 BOS, EOS 토큰 제외
                     if (num_boxes > self.layout_prompt_length or  # BOS, EOS는 layout_prompt에 포함되지 않음
                         otsl_length > self.config.otsl_max_length - 2):  # BOS, EOS를 위한 공간 확보
