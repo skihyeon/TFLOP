@@ -202,7 +202,11 @@ class TFLOP(nn.Module):
         # 각 스텝의 hidden states를 저장할 리스트
         all_hidden_states = []
         
+        # 생성 완료 여부를 추적하는 마스크
+        unfinished_sequences = torch.ones(B, dtype=torch.bool, device=layout_prompt.device)
+        
         # 토큰 생성 루프
+        generated_tokens = []
         for step in range(max_length):
             curr_length = curr_ids.size(1)
             attention_mask = torch.ones((B, prompt_length + curr_length), dtype=torch.bool, device=layout_prompt.device)
@@ -224,8 +228,45 @@ class TFLOP(nn.Module):
             past_key_values = decoder_outputs.past_key_values
             
             logits = self.bart.lm_head(decoder_outputs.last_hidden_state)
+            
+            # EOS 토큰에 대한 bias 추가 (deterministic하게 유지)
+            logits[:, :, self.tokenizer.eos_token_id] += 1.4
+            
+            # PAD 토큰은 생성하지 않도록 마스킹
+            logits[:, :, self.tokenizer.pad_token_id] = float('-inf')
+            
+            # Temperature sampling 대신 argmax 사용 (deterministic)
             next_token = torch.argmax(logits.squeeze(1), dim=-1, keepdim=True)
+            
+            # 완료되지 않은 시퀀스에 대해서만 토큰 추가
+            next_token = next_token * unfinished_sequences.unsqueeze(1) + \
+                        self.tokenizer.pad_token_id * (~unfinished_sequences.unsqueeze(1))
+            
+            generated_tokens.append(next_token)
             curr_ids = torch.cat([curr_ids, next_token], dim=1)
+            
+            # EOS 토큰이 생성된 시퀀스 체크
+            unfinished_sequences = unfinished_sequences & (next_token != self.tokenizer.eos_token_id).squeeze(1)
+            
+            # 모든 시퀀스가 완료되었으면 중단
+            if not unfinished_sequences.any():
+                break
+        
+        # 생성된 토큰들을 하나의 텐서로 결합
+        generated_sequence = torch.cat(generated_tokens, dim=1)  # (B, curr_length)
+        
+        # max_length까지 PAD 토큰으로 패딩
+        if generated_sequence.size(1) < max_length:
+            padding_length = max_length - generated_sequence.size(1)
+            padding = torch.full((B, padding_length), self.tokenizer.pad_token_id, 
+                               dtype=torch.long, device=generated_sequence.device)
+            generated_sequence = torch.cat([generated_sequence, padding], dim=1)
+        
+        # hidden states도 패딩
+        if len(all_hidden_states) < max_length:
+            last_hidden = all_hidden_states[-1]
+            padding_hidden = torch.zeros_like(last_hidden).repeat(1, max_length - len(all_hidden_states), 1)
+            all_hidden_states.append(padding_hidden)
         
         # 3. 최종 hidden states 구성
         bbox_embeddings = init_outputs.last_hidden_state

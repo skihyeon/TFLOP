@@ -13,9 +13,9 @@ from config import ModelConfig
 from pathlib import Path
 
 # 디버그 모드 설정
-DEBUG = True
+DEBUG = False
 DEBUG_SAMPLES = {
-    'train': 300000,
+    'train': 100000,
     'val': 8000
 }
 
@@ -139,8 +139,10 @@ class TableDataset(Dataset):
             image_path = self.image_paths[idx]
             image_name = image_path.name
             
-            # # 1. 이미지 로드 및 전처리
-            image = Image.open(image_path)
+            # 1. 이미지 로드 및 전처리
+            image = Image.open(image_path).convert('RGB')
+            image_width, image_height = image.size
+            image = self.image_processor(image, return_tensors="pt")  # 학습 모드와 동일하게 처리
             
             # 2. OCR 결과 처리 (있는 경우)
             boxes = []
@@ -163,7 +165,7 @@ class TableDataset(Dataset):
             # 3. 기본 필드만 반환
             return {
                 'image_name': image_name,
-                'images': image,
+                'images': image['pixel_values'].squeeze(0),  # 학습 모드와 동일한 형태로 반환
                 'bboxes': torch.FloatTensor(boxes) if boxes else torch.zeros((0, 4)),
                 'bbox_with_text': bbox_with_text,
                 'num_boxes': len(boxes)

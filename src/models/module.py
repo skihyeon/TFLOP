@@ -99,7 +99,8 @@ class TFLOPLightningModule(pl.LightningModule):
             try:
                 pred_tokens = pred_tokens_batch[i][pad_mask[i]]
                 pred_otsl = self.model.tokenizer.decode(pred_tokens.cpu().tolist())
-                
+                # print(f"pred_otsl: {pred_otsl}")
+                # print(f"true_otsl: {self.model.tokenizer.decode(true_tokens_batch[i].cpu().tolist())}")
                 pred_html = construct_table_html_pred(
                     pred_otsl,
                     batch['bbox_with_text'][i],

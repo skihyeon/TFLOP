@@ -41,7 +41,7 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """학습 설정"""
-    exp_name: str = "TFLOP_len200_bf16"
+    exp_name: str = "TFLOP_generateeos"
     use_wandb: bool = True
     
     # Resume training
@@ -78,12 +78,12 @@ class TrainingConfig:
     precision: str = "bf16-mixed"
     gradient_clip_val: float = 0.5
     num_sanity_val_steps: int = 2
-    check_val_every_n_epoch: int = 3
+    check_val_every_n_epoch: int = 5
     
     def __post_init__(self):
         # devices 설정 수정
         if self.devices is None:
-            self.devices = [0,1,2,3]  
+            self.devices = [2,3]  
         
         # accelerator 설정
         if not torch.cuda.is_available():

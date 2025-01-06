@@ -123,6 +123,7 @@ def create_dataloader(
     )
 
 def predict_collate_fn(batch: List[Dict]) -> Dict:
+    """Predict용 collate function"""
     batch_size = len(batch)
     config = ModelConfig()
     layout_prompt_length = config.total_sequence_length - config.otsl_max_length
@@ -131,15 +132,15 @@ def predict_collate_fn(batch: List[Dict]) -> Dict:
     images = torch.stack([item['images'] for item in batch])
     
     # 2. bbox 처리 (layout_prompt_length만큼 패딩)
-    bboxes = torch.zeros((batch_size, layout_prompt_length, 4))
+    padded_bboxes = torch.zeros(batch_size, layout_prompt_length, 4, dtype=torch.float32)
     for i, item in enumerate(batch):
-        if item['num_boxes'] > 0:
-            bboxes[i, :item['num_boxes']] = item['bboxes']
+        if item['num_boxes'] > 0:  # bbox가 있는 경우만 처리
+            padded_bboxes[i, :item['num_boxes']] = torch.tensor(item['bboxes'])
     
     return {
         'image_names': [item['image_name'] for item in batch],
         'images': images,
-        'bboxes': bboxes,  # collate_fn에서 패딩
+        'bboxes': padded_bboxes,
         'bbox_with_text': [item['bbox_with_text'] for item in batch],
         'num_boxes': torch.tensor([item['num_boxes'] for item in batch])
     }

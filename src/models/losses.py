@@ -136,20 +136,35 @@ class TFLOPLoss(nn.Module):
         if S1 < S2:
             pad_logits = torch.full(
                 (B, S2-S1, V), 
-                float('-inf'),  # 모든 토큰에 대해 매우 낮은 확률
+                float('-inf'),
                 device=tag_logits.device
             )
-            pad_logits[:, :, self.tokenizer.pad_token_id] = 0  # pad 토큰만 0으로 설정
-            
-            # 원래 logits와 패딩 logits 합치기
-            tag_logits = torch.cat([tag_logits, pad_logits], dim=1)  # (B, S2, V)
+            pad_logits[:, :, self.tokenizer.pad_token_id] = 0
+            tag_logits = torch.cat([tag_logits, pad_logits], dim=1)
         
-        return F.cross_entropy(
-            tag_logits.reshape(-1, V),  # (B*S2, V)
-            tag_targets.reshape(-1),    # (B*S2)
+        # EOS 토큰 위치 찾기
+        eos_positions = (tag_targets == self.tokenizer.eos_token_id)
+        
+        # 가중치 텐서 생성 (기본값 1.0)
+        weights = torch.ones_like(tag_targets, dtype=torch.float)
+        # EOS 토큰 위치의 가중치를 1.2으로 설정
+        weights[eos_positions] = 1.4
+        
+        # Cross entropy loss 계산
+        loss = F.cross_entropy(
+            tag_logits.reshape(-1, V),
+            tag_targets.reshape(-1),
             ignore_index=self.tokenizer.pad_token_id,
-            label_smoothing=0.0
+            label_smoothing=0.0,
+            reduction='none'  # 각 토큰별 loss 반환
         )
+        
+        # 가중치 적용
+        weighted_loss = loss * weights.reshape(-1)
+        
+        # 유효한 토큰 수로 나누어 평균 계산
+        valid_tokens = (tag_targets != self.tokenizer.pad_token_id).sum()
+        return weighted_loss.sum() / (valid_tokens + 1e-8)
         
     def forward(self, batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
 
