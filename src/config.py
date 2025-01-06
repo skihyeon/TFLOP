@@ -45,8 +45,8 @@ class TrainingConfig:
     use_wandb: bool = True
     
     # Resume training
-    resume_training: bool = False
-    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20250103_1656_TFLOP_test/checkpoints/TFLOP_test_epoch=31.ckpt"
+    resume_training: bool = True
+    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20250103_1823_TFLOP_len200_bf16/checkpoints/TFLOP_len200_bf16_epoch=13.ckpt"
     # resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20241211_1551_TFLOP_tiny/checkpoints/TFLOP_epoch=130.ckpt"
     
     # Data

@@ -52,7 +52,8 @@ def main():
             filename=f'{train_config.exp_name}' + '_{step}',
             save_top_k=3,
             every_n_train_steps=5000,
-            monitor='train/loss'
+            monitor='train/step_loss',
+            mode='min'
         ),
         ValidationVisualizationCallback(viz_dir=exp_dir / "visualizations"),
         BestModelSaveCallback(save_dir=exp_dir / "checkpoints")
