@@ -12,19 +12,6 @@ def collate_fn(batch, tokenizer, model_config):
     layout_prompt_length = model_config.total_sequence_length - model_config.otsl_max_length
     batch_size = len(batch)
     
-    # 디버깅을 위한 OTSL 토큰 검사
-    for i, sample in enumerate(batch):
-        try:
-            otsl_tokens = sample['otsl_tokens_list']
-            encoded = tokenizer.encode(otsl_tokens, padding=True, return_tensors='pt')
-        except Exception as e:
-            # 문제가 있는 샘플 제거
-            batch = [s for j, s in enumerate(batch) if j != i]
-            batch_size = len(batch)
-            if batch_size == 0:
-                raise ValueError("No valid samples in batch after filtering")
-            continue
-    
     # 1. 기본 데이터 처리
     image_names = [sample['image_name'] for sample in batch]
     images = torch.cat([sample['image']['pixel_values'] for sample in batch], dim=0)
@@ -59,8 +46,8 @@ def collate_fn(batch, tokenizer, model_config):
         for cell_idx, bbox_indices in sample['box_mappings'].items():
             if cell_idx < layout_prompt_length:
                 sequence_pos = seq_pos_cache[i].get(cell_idx)
-                if sequence_pos is not None and 0 <= sequence_pos < model_config.otsl_max_length - 2:
-                    adjusted_pos = sequence_pos + 1  # BOS 고려
+                if sequence_pos is not None and 0 <= sequence_pos < model_config.otsl_max_length - 1:
+                    adjusted_pos = sequence_pos
                     for j, bbox_idx in enumerate(bbox_indices[:max_mappings]):
                         box_indices[i, bbox_idx, j] = adjusted_pos
     
@@ -73,13 +60,13 @@ def collate_fn(batch, tokenizer, model_config):
     for i, sample in enumerate(batch):
         # attention mask는 전체 시퀀스에 대해 설정
         seq_length = len(sample['otsl_tokens_list'])
-        attention_mask[i, :layout_prompt_length + seq_length + 2] = True  # layout_prompt + BOS + sequence + EOS
+        attention_mask[i, :layout_prompt_length + seq_length + 1] = True  # layout_prompt + sequence + EOS
         
         # data/empty tag mask는 실제 토큰 위치에만 설정
         for cell in sample['cells']:
             pos = cell['sequence_pos']
-            if 0 <= pos < model_config.otsl_max_length - 2:  # BOS, EOS 공간 제외
-                mask_pos = layout_prompt_length + pos + 1  # layout_prompt 이후, BOS 다음부터
+            if 0 <= pos < model_config.otsl_max_length - 1:  # EOS 공간 제외
+                mask_pos = layout_prompt_length + pos
                 if cell['has_data']:
                     data_tag_mask[i, mask_pos] = True
                 else:

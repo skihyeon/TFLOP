@@ -29,12 +29,12 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """학습 관련 설정"""
-    exp_name: str = "TFLOP_test"
-    use_wandb: bool = False
+    exp_name: str = "TFLOP_len200_bf16"
+    use_wandb: bool = True
     
     # Resume training
-    resume_training: bool = False
-    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20250103_1823_TFLOP_len200_bf16/checkpoints/TFLOP_len200_bf16_epoch=13.ckpt"
+    resume_training: bool = True
+    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20250103_1823_TFLOP_len200_bf16/step_checkpoints/TFLOP_noShift_step=49999.ckpt"
     
     # Data
     data_dir: str = "./data/pubtabnet"
@@ -46,11 +46,11 @@ class TrainingConfig:
     checkpoint_dir: str = "./checkpoints"
     batch_size: int = 4
     accumulate_grad_batches: int = 4
-    learning_rate: float = 1e-5
+    learning_rate: float = 1e-4
     
     # Hardware
     gpu_id: int = 3
-    devices: list = None
+    devices: list = None        # dataclass 는 기본적으로 list 안받음
     accelerator: str = "gpu"
     strategy: str = "ddp"
     sync_batchnorm: bool = True

@@ -83,8 +83,8 @@ class OTSLTokenizer:
         token_ids = [self.pad_token_id] * max_length if padding else []
         
         current_pos = 0
-        token_ids[current_pos] = self.bos_token_id
-        current_pos += 1
+        # token_ids[current_pos] = self.bos_token_id
+        # current_pos += 1
         
         for token in tokens:
             if current_pos >= max_length - 1:

@@ -125,12 +125,11 @@ class TFLOP(nn.Module):
     
     def _train_forward(self, batch, visual_features, layout_prompt):
         labels = batch['token_ids']     
-        # decoder_input_ids = shift_tokens_right(
-        #     labels,
-        #     self.tokenizer.pad_token_id,
-        #     self.tokenizer.bos_token_id
-        # )
-        decoder_input_ids = labels
+        decoder_input_ids = shift_tokens_right(
+            labels,
+            self.tokenizer.pad_token_id,
+            self.tokenizer.bos_token_id
+        )
         
         token_embeds = self.bart.model.decoder.embed_tokens(decoder_input_ids)
         prompt_inputs = torch.cat([layout_prompt, token_embeds], dim=1)

@@ -11,12 +11,15 @@ from utils.util import convert_html_to_otsl
 from transformers import AutoImageProcessor
 from config import ModelConfig
 from pathlib import Path
+import mmap
+import json
+from collections import Counter
 
 # 디버그 모드 설정
 DEBUG = False
 DEBUG_SAMPLES = {
-    'train': 10,
-    'val': 10
+    'train': 1000,
+    'val': 100
 }
 
 class BaseTableDataset(Dataset):
@@ -91,24 +94,22 @@ class TableDataset(BaseTableDataset):
         self.annotations = {}
         self.image_names = []
         filtered_count = 0
+        token_counts = Counter()
         
-        # 토큰 통계를 위한 카운터 초기화
-        token_counts = {
-            '[BOS]': 0,
-            '[EOS]': 0,
-            'C': 0, 
-            'NL': 0,
-            'L': 0,
-            'U': 0,
-            'X': 0
-        }
-        
-        with jsonlines.open(ann_file) as reader:
-            for ann in reader:
+        # 메모리 매핑으로 파일 열기
+        with open(ann_file, 'rb') as f:
+            mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+            
+            while True:
+                line = mm.readline()
+                if not line:  # EOF
+                    break
+                    
                 if DEBUG and len(self.image_names) >= DEBUG_SAMPLES[self.split]:
                     break
                     
                 try:
+                    ann = json.loads(line.decode('utf-8'))
                     otsl_tokens_list, has_data_flags_list = convert_html_to_otsl(ann)
                     if otsl_tokens_list is None:
                         filtered_count += 1
@@ -118,20 +119,16 @@ class TableDataset(BaseTableDataset):
                     num_boxes = len(ann['html']['cells'])
                     otsl_length = len(otsl_tokens_list)
                     
-                    # layout prompt와 otsl sequence 각각의 길이 제한 검증 && otsl sequence에서 BOS, EOS 토큰 제외
-                    if (num_boxes > self.layout_prompt_length or  # BOS, EOS는 layout_prompt에 포함되지 않음
-                        otsl_length > self.config.otsl_max_length - 2):  # BOS, EOS를 위한 공간 확보
+                    if (num_boxes > self.layout_prompt_length or
+                        otsl_length > self.config.otsl_max_length - 1):
                         filtered_count += 1
                         continue
                     
                     # 토큰 카운트 업데이트
-                    token_counts['[BOS]'] += 1
-                    token_counts['[EOS]'] += 1
-                    for token in otsl_tokens_list:
-                        if token in token_counts:
-                            token_counts[token] += 1
+                    token_counts.update(otsl_tokens_list)
                     
                     image_name = ann['filename']
+                    # 필요한 정보만 저장
                     self.annotations[image_name] = {
                         'html': ann['html'],
                         'otsl_tokens_list': otsl_tokens_list,
@@ -142,6 +139,8 @@ class TableDataset(BaseTableDataset):
                 except Exception:
                     filtered_count += 1
                     continue
+            
+            mm.close()
         
         print(f"\nDataset {self.split}:")
         print(f"Valid samples: {len(self.image_names)}")
