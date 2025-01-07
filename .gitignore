@@ -13,3 +13,4 @@ src/debugs
 *.html
 *.png
 *.jpg
+!requirements.txt
