@@ -41,7 +41,7 @@ class TFLOPLoss(nn.Module):
                             data_tag_mask: torch.Tensor,
                             temperature: float = 0.1) -> torch.Tensor:
         B, num_boxes, seq_len = pointer_logits.shape
-        
+
         # Temperature scaling in softmax
         log_probs = F.log_softmax(pointer_logits / temperature, dim=-1)
         
@@ -77,9 +77,15 @@ class TFLOPLoss(nn.Module):
         otsl_mask = (data_tag_mask | empty_tag_mask)[:, self.layout_prompt_length:]
         targets = empty_tag_mask[:, self.layout_prompt_length:]
         
+        # empty cell 비율에 따른 가중치 계산
+        num_empty = (targets * otsl_mask).sum()
+        num_total = otsl_mask.sum()
+        pos_weight = (num_total - num_empty) / (num_empty + 1e-8)
+        
         bce_loss = F.binary_cross_entropy_with_logits(
             empty_logits,
             targets.float(),
+            pos_weight=pos_weight * torch.ones_like(targets),
             reduction='none'
         )
         
@@ -92,36 +98,28 @@ class TFLOPLoss(nn.Module):
     
     def compute_span_aware_contrastive_loss(
             self,
-            sim_matrix: torch.Tensor,  # (B, N, N)
-            span_coef_matrix: torch.Tensor,  # (B, N, N)
+            sim_matrix: torch.Tensor,
+            span_coef_matrix: torch.Tensor,
         ) -> torch.Tensor:
         device = sim_matrix.device
         span_coef_matrix = span_coef_matrix.to(device)
         
-        # Temperature scaling
-        sim_matrix = sim_matrix / self.temperature  # (B, N, N)
+        sim_matrix = sim_matrix / self.temperature
         
-        # 1. Compute exp(sim_matrix/τ) for all pairs
-        exp_sim = torch.exp(sim_matrix)  # (B, N, N)
+        exp_sim = torch.exp(sim_matrix)
         
-        # 2. Compute denominator (sum over all pairs)
-        denominator = exp_sim.sum(dim=-1, keepdim=True)  # (B, N, 1)
+        denominator = exp_sim.sum(dim=-1, keepdim=True)
         
-        # 3. Compute log probabilities
-        log_probs = torch.log(exp_sim / denominator + 1e-8)  # (B, N, N)
+        log_probs = torch.log(exp_sim / denominator + 1e-8)
         
-        # 4. Mask for valid pairs (coef >= 0)
-        valid_mask = (span_coef_matrix >= 0)  # (B, N, N)
+        valid_mask = (span_coef_matrix >= 0)
         
-        # 5. Compute weighted sum of log probs for valid pairs
         weighted_log_probs = span_coef_matrix * log_probs * valid_mask
         
-        # 6. Normalize by sum of coefficients and compute mean
-        coef_sum = span_coef_matrix.sum(dim=-1) + 1e-8  # (B, N)
-        box_losses = -(weighted_log_probs.sum(dim=-1) / coef_sum)  # (B, N)
+        coef_sum = span_coef_matrix.sum(dim=-1) + 1e-8
+        box_losses = -(weighted_log_probs.sum(dim=-1) / coef_sum)
         
-        # 7. Mask out invalid boxes (no positive pairs)
-        valid_boxes = valid_mask.any(dim=-1)  # (B, N)
+        valid_boxes = valid_mask.any(dim=-1)
         final_loss = (box_losses * valid_boxes).sum() / (valid_boxes.sum() + 1e-8)
         
         return final_loss
@@ -138,20 +136,35 @@ class TFLOPLoss(nn.Module):
         if S1 < S2:
             pad_logits = torch.full(
                 (B, S2-S1, V), 
-                float('-inf'),  # 모든 토큰에 대해 매우 낮은 확률
+                float('-inf'),
                 device=tag_logits.device
             )
-            pad_logits[:, :, self.tokenizer.pad_token_id] = 0  # pad 토큰만 0으로 설정
-            
-            # 원래 logits와 패딩 logits 합치기
-            tag_logits = torch.cat([tag_logits, pad_logits], dim=1)  # (B, S2, V)
+            pad_logits[:, :, self.tokenizer.pad_token_id] = 0
+            tag_logits = torch.cat([tag_logits, pad_logits], dim=1)
         
-        return F.cross_entropy(
-            tag_logits.reshape(-1, V),  # (B*S2, V)
-            tag_targets.reshape(-1),    # (B*S2)
+        # EOS 토큰 위치 찾기
+        eos_positions = (tag_targets == self.tokenizer.eos_token_id)
+        
+        # 가중치 텐서 생성 (기본값 1.0)
+        weights = torch.ones_like(tag_targets, dtype=torch.float)
+        # EOS 토큰 위치의 가중치를 1.2으로 설정
+        weights[eos_positions] = 1.4
+        
+        # Cross entropy loss 계산
+        loss = F.cross_entropy(
+            tag_logits.reshape(-1, V),
+            tag_targets.reshape(-1),
             ignore_index=self.tokenizer.pad_token_id,
-            label_smoothing=0.0
+            label_smoothing=0.0,
+            reduction='none'  # 각 토큰별 loss 반환
         )
+        
+        # 가중치 적용
+        weighted_loss = loss * weights.reshape(-1)
+        
+        # 유효한 토큰 수로 나누어 평균 계산
+        valid_tokens = (tag_targets != self.tokenizer.pad_token_id).sum()
+        return weighted_loss.sum() / (valid_tokens + 1e-8)
         
     def forward(self, batch: Dict[str, torch.Tensor], outputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
 

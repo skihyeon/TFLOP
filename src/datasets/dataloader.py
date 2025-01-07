@@ -1,30 +1,16 @@
 from typing import Dict, List, Union
 import torch
 from torch.utils.data import DataLoader
-from .dataset import TableDataset
-from models.otsl_tokenizer import OTSLTokenizer
+from .dataset import TableDataset, PredictTableDataset
 from config import ModelConfig
+from typing import Any
 
-def collate_fn(batch, tokenizer):
+def collate_fn(batch, tokenizer, model_config):
     """
-    Collate function for DataLoader
+    학습/평가용 Collate function
     """
-    config = ModelConfig()
-    layout_prompt_length = config.total_sequence_length - config.otsl_max_length
+    layout_prompt_length = model_config.total_sequence_length - model_config.otsl_max_length
     batch_size = len(batch)
-    
-    # 디버깅을 위한 OTSL 토큰 검사
-    for i, sample in enumerate(batch):
-        try:
-            otsl_tokens = sample['otsl_tokens_list']
-            encoded = tokenizer.encode(otsl_tokens, padding=True, return_tensors='pt')
-        except Exception as e:
-            # 문제가 있는 샘플 제거
-            batch = [s for j, s in enumerate(batch) if j != i]
-            batch_size = len(batch)
-            if batch_size == 0:
-                raise ValueError("No valid samples in batch after filtering")
-            continue
     
     # 1. 기본 데이터 처리
     image_names = [sample['image_name'] for sample in batch]
@@ -60,14 +46,13 @@ def collate_fn(batch, tokenizer):
         for cell_idx, bbox_indices in sample['box_mappings'].items():
             if cell_idx < layout_prompt_length:
                 sequence_pos = seq_pos_cache[i].get(cell_idx)
-                if sequence_pos is not None and 0 <= sequence_pos < config.otsl_max_length - 2:  # BOS, EOS 공간 제외
-                    # sequence_pos는 실제 토큰 위치, BOS 다음부터 시작
-                    adjusted_pos = sequence_pos + 1  # BOS 다음부터 시작
+                if sequence_pos is not None and 0 <= sequence_pos < model_config.otsl_max_length - 1:
+                    adjusted_pos = sequence_pos
                     for j, bbox_idx in enumerate(bbox_indices[:max_mappings]):
                         box_indices[i, bbox_idx, j] = adjusted_pos
     
     # 5. 마스크 처리
-    total_length = layout_prompt_length + config.otsl_max_length  # 전체 길이 (BOS, EOS 포함)
+    total_length = layout_prompt_length + model_config.otsl_max_length  # 전체 길이 (BOS, EOS 포함)
     attention_mask = torch.zeros(batch_size, total_length, dtype=torch.bool)
     data_tag_mask = torch.zeros(batch_size, total_length, dtype=torch.bool)
     empty_tag_mask = torch.zeros(batch_size, total_length, dtype=torch.bool)
@@ -75,13 +60,13 @@ def collate_fn(batch, tokenizer):
     for i, sample in enumerate(batch):
         # attention mask는 전체 시퀀스에 대해 설정
         seq_length = len(sample['otsl_tokens_list'])
-        attention_mask[i, :layout_prompt_length + seq_length + 2] = True  # layout_prompt + BOS + sequence + EOS
+        attention_mask[i, :layout_prompt_length + seq_length + 1] = True  # layout_prompt + sequence + EOS
         
         # data/empty tag mask는 실제 토큰 위치에만 설정
         for cell in sample['cells']:
             pos = cell['sequence_pos']
-            if 0 <= pos < config.otsl_max_length - 2:  # BOS, EOS 공간 제외
-                mask_pos = layout_prompt_length + pos + 1  # layout_prompt 이후, BOS 다음부터
+            if 0 <= pos < model_config.otsl_max_length - 1:  # EOS 공간 제외
+                mask_pos = layout_prompt_length + pos
                 if cell['has_data']:
                     data_tag_mask[i, mask_pos] = True
                 else:
@@ -100,63 +85,62 @@ def collate_fn(batch, tokenizer):
         'html': [sample['html'] for sample in batch],
         'bbox_with_text': [sample['bbox_with_text'] for sample in batch]
     }
-    
 
+def predict_collate_fn(batch: List[Dict], model_config: Any) -> Dict:
+    """예측용 collate function"""
+    layout_prompt_length = model_config.total_sequence_length - model_config.otsl_max_length
+    batch_size = len(batch)
+    
+    # 1. 이미지 처리
+    images = torch.cat([sample['images'].unsqueeze(0) for sample in batch], dim=0)
+    
+    # 2. bbox 처리 (layout_prompt_length만큼 패딩)
+    padded_bboxes = torch.zeros(batch_size, layout_prompt_length, 4, dtype=torch.float32)
+    for i, item in enumerate(batch):
+        if item['num_boxes'] > 0:
+            padded_bboxes[i, :item['num_boxes']] = item['bboxes']
+    
+    return {
+        'image_names': [item['image_name'] for item in batch],
+        'images': images,
+        'bboxes': padded_bboxes,
+        'bbox_with_text': [item['bbox_with_text'] for item in batch],
+        'num_boxes': torch.tensor([item['num_boxes'] for item in batch])
+    }
 
 def create_dataloader(
     dataset: TableDataset,
-    tokenizer: OTSLTokenizer,
+    tokenizer: Any,
     batch_size: int = 8,
     shuffle: bool = True,
     num_workers: int = 4,
     pin_memory: bool = True,
     drop_last: bool = False
 ) -> DataLoader:
-    """데이터로더 생성"""
+    """학습/평가용 DataLoader 생성"""
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        collate_fn=lambda batch: collate_fn(batch, tokenizer),
+        collate_fn=lambda batch: collate_fn(batch, tokenizer, dataset.config),
         pin_memory=pin_memory,
         drop_last=drop_last
     )
 
-def predict_collate_fn(batch: List[Dict]) -> Dict:
-    batch_size = len(batch)
-    config = ModelConfig()
-    layout_prompt_length = config.total_sequence_length - config.otsl_max_length
-    
-    # 1. 이미지 처리
-    images = torch.stack([item['images'] for item in batch])
-    
-    # 2. bbox 처리 (layout_prompt_length만큼 패딩)
-    bboxes = torch.zeros((batch_size, layout_prompt_length, 4))
-    for i, item in enumerate(batch):
-        if item['num_boxes'] > 0:
-            bboxes[i, :item['num_boxes']] = item['bboxes']
-    
-    return {
-        'image_names': [item['image_name'] for item in batch],
-        'images': images,
-        'bboxes': bboxes,  # collate_fn에서 패딩
-        'bbox_with_text': [item['bbox_with_text'] for item in batch],
-        'num_boxes': torch.tensor([item['num_boxes'] for item in batch])
-    }
-
 def create_predict_dataloader(
-    dataset: TableDataset,
+    dataset: PredictTableDataset,
+    tokenizer: Any,
     batch_size: int = 1,
     num_workers: int = 4,
     pin_memory: bool = True
 ) -> DataLoader:
-    """Predict용 DataLoader 생성"""
+    """예측용 DataLoader 생성"""
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        collate_fn=predict_collate_fn
+        collate_fn=lambda batch: predict_collate_fn(batch, dataset.config)
     )

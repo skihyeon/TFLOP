@@ -26,55 +26,37 @@ class OTSLTokenizer:
     - layout_prompt_length는 데이터셋의 대 bounding box 개수에 따라 결정됩니다
     - total_sequence_length는 논문의 실험 설정값 1376입니다
     """
+    # 클래스 레벨에서 상수 정의
+    SPECIAL_TOKENS = {
+        "bos_token": "[BOS]",
+        "pad_token": "[PAD]",
+        "eos_token": "[EOS]"
+    }
+    OTSL_TAGS = ["C", "L", "U", "X", "NL"]
+
     def __init__(
         self,
         otsl_sequence_length: int,  # 논문 4.2 Experimental Settings
-        bos_token: str = "[BOS]",
-        pad_token: str = "[PAD]",
-        eos_token: str = "[EOS]",
+        bos_token: str = SPECIAL_TOKENS["bos_token"],
+        pad_token: str = SPECIAL_TOKENS["pad_token"],
+        eos_token: str = SPECIAL_TOKENS["eos_token"]
     ):
-        # 기본 설정
         self.otsl_sequence_length = otsl_sequence_length
         
-        # Special tokens
-        self.special_tokens = {
-            "bos_token": bos_token,
-            "pad_token": pad_token,
-            "eos_token": eos_token,
-        }
-        
-        # OTSL의 5가지 기본 토큰
-        self.otsl_tags = ["C", "L", "U", "X", "NL"]
-        
-        # Build vocabulary
-        self.token2id = {}
-        idx = 0
-        
-        # Add special tokens
-        for token in self.special_tokens.values():
-            self.token2id[token] = idx
-            idx += 1
-            
-        # Add OTSL tokens
-        for token in self.otsl_tags:
-            self.token2id[token] = idx
-            idx += 1
-            
-        # Create reverse mapping
-        self.id2token = {v: k for k, v in self.token2id.items()}
-        
-        # Save attributes
+        # 한 번에 vocabulary 생성
+        all_tokens = list(self.SPECIAL_TOKENS.values()) + self.OTSL_TAGS
+        self.token2id = {token: idx for idx, token in enumerate(all_tokens)}
+        self.id2token = {idx: token for token, idx in self.token2id.items()}
         self.vocab_size = len(self.token2id)
         
-        # Special token IDs
+        # Special tokens와 their IDs
+        self.bos_token = bos_token
+        self.pad_token = pad_token
+        self.eos_token = eos_token
+        
         self.bos_token_id = self.token2id[bos_token]
         self.pad_token_id = self.token2id[pad_token]
         self.eos_token_id = self.token2id[eos_token]
-        
-        # Special token attributes
-        self.pad_token = pad_token
-        self.bos_token = bos_token
-        self.eos_token = eos_token
         
         # OTSL token IDs
         self.c_token_id = self.token2id["C"]
@@ -82,11 +64,61 @@ class OTSLTokenizer:
         self.u_token_id = self.token2id["U"]
         self.x_token_id = self.token2id["X"]
         self.nl_token_id = self.token2id["NL"]
+        
+        # 모든 토큰 ID 리스트
+        self.otsl_token_ids = list(self.token2id.values())
 
-        self.otsl_token_ids = [self.bos_token_id, self.pad_token_id, self.eos_token_id,
-                              self.c_token_id, self.l_token_id, self.u_token_id,
-                              self.x_token_id, self.nl_token_id]
     
+    def encode(
+        self,
+        tokens: List[str],
+        padding: bool = True,
+        return_tensors: Optional[str] = None
+    ) -> Union[List[int], torch.Tensor]:
+        if not self.validate_syntax(tokens):
+            raise ValueError("Invalid OTSL syntax")
+        
+        max_length = self.otsl_sequence_length
+        
+        token_ids = [self.pad_token_id] * max_length if padding else []
+        
+        current_pos = 0
+        # token_ids[current_pos] = self.bos_token_id
+        # current_pos += 1
+        
+        for token in tokens:
+            if current_pos >= max_length - 1:
+                break
+            token_ids[current_pos] = self.token2id[token]
+            current_pos += 1
+        
+        if current_pos < max_length:
+            token_ids[current_pos] = self.eos_token_id
+        
+        if not padding:
+            token_ids = token_ids[:current_pos + 1]
+        
+        return torch.tensor(token_ids) if return_tensors == "pt" else token_ids
+    
+    def decode(
+        self,
+        token_ids: Union[List[int], torch.Tensor]
+    ) -> str:
+        if isinstance(token_ids, torch.Tensor):
+            token_ids = token_ids.tolist()
+        
+        special_ids = {self.pad_token_id, self.bos_token_id, self.eos_token_id}
+        
+        tokens = []
+        tokens.extend(
+            self.id2token[token_id]
+            for token_id in token_ids
+            if token_id not in special_ids and token_id in self.id2token
+        )
+        
+        return " ".join(tokens)
+    
+        
     def validate_syntax(self, tokens: List[str]) -> bool:
         """OTSL 문법 규칙 검증"""
         if not tokens:
@@ -144,81 +176,4 @@ class OTSLTokenizer:
                         
         return True
     
-    def encode(
-        self,
-        tokens: List[str],
-        add_special_tokens: bool = True,
-        padding: bool = True,
-        return_tensors: Optional[str] = None
-    ) -> Union[List[int], torch.Tensor]:
-        """OTSL 시퀀스를 토큰 ID로 변환"""
-        max_length = self.otsl_sequence_length
-            
-        # Validate syntax
-        if not self.validate_syntax(tokens):
-            raise ValueError("Invalid OTSL syntax")
-            
-        # Convert to IDs
-        token_ids = []
-        
-        # Add BOS token
-        if add_special_tokens:
-            token_ids.append(self.bos_token_id)
-            
-        # Add OTSL tokens
-        for token in tokens:
-            if token in self.token2id:
-                token_ids.append(self.token2id[token])
-
-        # Add EOS token
-        if add_special_tokens:
-            token_ids.append(self.eos_token_id)
-            
-        # Pad if needed
-        if padding and len(token_ids) < max_length:
-            token_ids.extend([self.pad_token_id] * (max_length - len(token_ids)))
-            
-        # Convert to tensor if requested
-        if return_tensors == "pt":
-            return torch.tensor(token_ids)
-            
-        return token_ids
-    
-    def decode(
-        self,
-        token_ids: Union[List[int], torch.Tensor],
-        skip_special_tokens: bool = True,
-        clean_up_tokenization_spaces: bool = True
-    ) -> str:
-        """토큰 ID를 OTSL 시퀀스로 변환"""
-        if isinstance(token_ids, torch.Tensor):
-            token_ids = token_ids.tolist()
-            
-        tokens = []
-        
-        for token_id in token_ids:
-            # Skip special tokens if requested
-            if skip_special_tokens:
-                if token_id in [self.pad_token_id, self.bos_token_id, self.eos_token_id]:
-                    continue
-                    
-            # Convert token ID to text
-            if token_id in self.id2token:
-                tokens.append(self.id2token[token_id])
-                
-        # Join tokens
-        text = " ".join(tokens)
-        
-        # Clean up spaces if requested
-        if clean_up_tokenization_spaces:
-            text = self._clean_up_tokenization(text)
-            
-        return text
-    
-    def _clean_up_tokenization(self, text: str) -> str:
-        """토크나이제이션 후처리"""
-        # OTSL 토큰 사이의 공백 처리
-        text = re.sub(r'\s+(NL)\s+', r' \1 ', text)
-        text = re.sub(r'\s+([CLUX])\s+', r' \1 ', text)
-        return text.strip()
     

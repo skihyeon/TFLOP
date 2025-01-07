@@ -59,7 +59,8 @@ def main():
     # 5. 테스트를 위한 Trainer 설정
     trainer = pl.Trainer(
         accelerator='gpu',  # 명시적으로 GPU 설정
-        devices=[train_config.gpu_id],
+        # devices=[train_config.gpu_id],
+        devices=[0,1,2,3],
         # strategy='single_device',
         precision=train_config.precision,
         logger=False,
