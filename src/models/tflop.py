@@ -125,12 +125,12 @@ class TFLOP(nn.Module):
     
     def _train_forward(self, batch, visual_features, layout_prompt):
         labels = batch['token_ids']     
-        
-        decoder_input_ids = shift_tokens_right(
-            labels,
-            self.tokenizer.pad_token_id,
-            self.tokenizer.bos_token_id
-        )
+        # decoder_input_ids = shift_tokens_right(
+        #     labels,
+        #     self.tokenizer.pad_token_id,
+        #     self.tokenizer.bos_token_id
+        # )
+        decoder_input_ids = labels
         
         token_embeds = self.bart.model.decoder.embed_tokens(decoder_input_ids)
         prompt_inputs = torch.cat([layout_prompt, token_embeds], dim=1)
@@ -254,7 +254,7 @@ class TFLOP(nn.Module):
         
         # 생성된 토큰들을 하나의 텐서로 결합
         generated_sequence = torch.cat(generated_tokens, dim=1)  # (B, curr_length)
-        
+        # print(generated_sequence)
         # max_length까지 PAD 토큰으로 패딩
         if generated_sequence.size(1) < max_length:
             padding_length = max_length - generated_sequence.size(1)

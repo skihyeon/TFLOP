@@ -41,7 +41,7 @@ class TFLOPLoss(nn.Module):
                             data_tag_mask: torch.Tensor,
                             temperature: float = 0.1) -> torch.Tensor:
         B, num_boxes, seq_len = pointer_logits.shape
-        
+
         # Temperature scaling in softmax
         log_probs = F.log_softmax(pointer_logits / temperature, dim=-1)
         

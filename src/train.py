@@ -35,7 +35,7 @@ def main():
     
     model = TFLOPLightningModule(
         model_config=model_config,
-        train_config=train_config,
+        train_config=train_config
     )
     
     callbacks = [
@@ -73,7 +73,6 @@ def main():
         logger = False
     
     if train_config.resume_training:
-        # 기존 config 파일들 확인
         existing_configs = list(exp_dir.glob("config*.txt"))
         next_num = len(existing_configs) + 1
         config_path = exp_dir / f"config_{next_num}.txt"
@@ -81,31 +80,27 @@ def main():
         config_path = exp_dir / "config.txt"
         
     with open(config_path, "w") as f:
-        # 모델 설정 저장
         f.write("=" * 50 + "\n")
-        f.write("Model Configuration\n") 
+        f.write("Model Configuration\n")
         f.write("=" * 50 + "\n")
-        model_config_dict = model_config.to_dict()
-        for key, value in model_config_dict.items():
+        for key, value in model_config.to_dict().items():
             f.write(f"{key:25s}: {value}\n")
             
-        # 학습 설정 저장 
         f.write("\n" + "=" * 50 + "\n")
         f.write("Training Configuration\n")
         f.write("=" * 50 + "\n")
-        train_config_dict = train_config.to_dict()
-        for key, value in train_config_dict.items():
+        for key, value in train_config.to_dict().items():
             f.write(f"{key:25s}: {value}\n")
     
     trainer = pl.Trainer(
-        max_epochs=train_config.num_epochs,  # step 대신 epoch 사용
+        max_epochs=train_config.num_epochs,
         accelerator=train_config.accelerator,
         devices=train_config.devices,
         strategy=train_config.strategy,
         precision=train_config.precision,
         accumulate_grad_batches=train_config.accumulate_grad_batches,
         gradient_clip_val=train_config.gradient_clip_val,
-        check_val_every_n_epoch=train_config.check_val_every_n_epoch,  # 매 epoch마다 validation 수행
+        check_val_every_n_epoch=train_config.check_val_every_n_epoch,
         num_sanity_val_steps=train_config.num_sanity_val_steps,
         logger=logger,
         callbacks=callbacks,
@@ -116,7 +111,6 @@ def main():
 
     if train_config.resume_training and train_config.resume_checkpoint_path:
         print(f"Resuming training from checkpoint: {train_config.resume_checkpoint_path}")
-        # 체크포인트는 trainer.fit에서만 로딩
         trainer.fit(model, datamodule=datamodule, ckpt_path=train_config.resume_checkpoint_path)
     else:
         trainer.fit(model, datamodule=datamodule)
@@ -124,7 +118,6 @@ def main():
 
 if __name__ == '__main__':
     from setproctitle import setproctitle
-    from datetime import datetime
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     setproctitle(f"TFLOP_{timestamp}")
     pl.seed_everything(42)

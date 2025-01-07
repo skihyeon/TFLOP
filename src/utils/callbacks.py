@@ -5,6 +5,7 @@ from typing import Dict, Union
 import torch
 from pathlib import Path
 import json
+from datetime import datetime
 
 class ValidationVisualizationCallback(Callback):
     def __init__(self, viz_dir: str):
@@ -109,11 +110,12 @@ class ValidationVisualizationCallback(Callback):
         """
 
 class BestModelSaveCallback(Callback):
-    def __init__(self, save_dir: Union[str, Path]):
+    def __init__(self, save_dir: Union[str, Path], save_name: str = "best"):
         super().__init__()
         self.best_teds = 0.0
         self.save_dir = Path(save_dir)
         self.save_dir.mkdir(parents=True, exist_ok=True)
+        self.save_name = save_name
         
     def on_validation_end(
         self, 
@@ -123,20 +125,44 @@ class BestModelSaveCallback(Callback):
         if trainer.sanity_checking:
             return
             
-        # 수정된 메트릭 이름 사용
         current_teds = trainer.callback_metrics['teds'].item()
         
         if current_teds > self.best_teds:
             self.best_teds = current_teds
-            save_path = self.save_dir / f"{pl_module.train_config.exp_name}_best.pt"
+            
+            # 저장할 파일명 설정 (train_config가 있는 경우 exp_name 사용)
+            if hasattr(pl_module, 'train_config') and pl_module.train_config is not None:
+                save_name = f"{pl_module.train_config.exp_name}_{self.save_name}"
+            else:
+                save_name = self.save_name
+            
+            save_path = self.save_dir / f"{save_name}.pt"
             
             try:
-                torch.save({
+                # 기본적으로 필요한 정보만 저장
+                save_dict = {
                     'state_dict': pl_module.state_dict(),
                     'model_config': pl_module.model_config.__dict__,
-                    'train_config': pl_module.train_config.__dict__,
-                    'teds_score': current_teds
-                }, save_path)
+                    # 'teds_score': current_teds
+                }
+                
+                # train_config가 있는 경우에만 저장
+                if hasattr(pl_module, 'train_config') and pl_module.train_config is not None:
+                    save_dict['train_config'] = pl_module.train_config.__dict__
+                
+                torch.save(save_dict, save_path)
                 print(f"Saved best model with TEDS score: {current_teds:.4f}")
+                
+                # 메타데이터 저장 (JSON 형식)
+                meta_path = save_path.with_suffix('.json')
+                meta_data = {
+                    'teds_score': float(current_teds),
+                    'save_time': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'model_config': pl_module.model_config.to_dict()
+                }
+                
+                with open(meta_path, 'w', encoding='utf-8') as f:
+                    json.dump(meta_data, f, indent=2, ensure_ascii=False)
+                
             except Exception as e:
                 print(f"Error saving best model: {str(e)}")
