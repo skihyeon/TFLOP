@@ -41,12 +41,37 @@ def convert_html_to_otsl(ann: Dict) -> Tuple[List[str], List[bool]]:
     has_content = [len(cell['tokens']) > 0 for cell in cells]
     current_cell_idx = 0
     
-    # 1. 그리드 크기와 span 정보 수집
+    # 1. 먼저 전체 그리드 크기 계산
     num_cols = 0
     current_row = -1
     current_col = 0
-    spans = {}  # (row, col) -> (rowspan, colspan)
-    active_rowspans = {}  # col -> (start_row, rowspan)
+    max_colspan = 0  # colspan 최대값 추적
+    
+    for i, token in enumerate(html_tokens):
+        if token == '<tr>':
+            current_row += 1
+            current_col = 0
+        elif token == '</tr>':
+            num_cols = max(num_cols, current_col)
+        elif token == '<td' or token == '<td>':
+            colspan = 1
+            if token == '<td':
+                j = i + 1
+                while j < len(html_tokens) and html_tokens[j] != '>':
+                    if 'colspan=' in html_tokens[j]:
+                        colspan = int(html_tokens[j].split('"')[1])
+                        max_colspan = max(max_colspan, colspan)
+                    j += 1
+            current_col += colspan
+    
+    # 실제 필요한 열 수 계산
+    num_cols = max(num_cols, current_col + max_colspan)
+    
+    # 2. 그 다음 원래 로직 진행
+    current_row = -1
+    current_col = 0
+    spans = {}
+    active_rowspans = {}
     
     i = 0
 
@@ -271,7 +296,7 @@ def construct_table_html_pred(
 ) -> str:
     """OTSL과 pointer logits를 사용하여 예측 테이블 생성"""
     # 1. OTSL 토큰을 그리드로 변환
-    tokens = [t for t in otsl_sequence.split() if t not in ['[BOS]', '[EOS]', '[PAD]', '[UNK]']]
+    tokens = [t for t in otsl_sequence.split() if t not in ['[BOS]', '[EOS]', '[PAD]']]
     grid = []
     current_row = []
     
@@ -314,7 +339,19 @@ def construct_table_html_pred(
             return origin
         
         if token == 'U':
-            origin = find_origin_cell(row-1, col)
+            # 연속된 U 태그를 처리하기 위해 위로 계속 올라가면서 확인
+            current_row = row - 1
+            while current_row >= 0:
+                if grid[current_row][col] == 'C':
+                    origin = (current_row, col)
+                    break
+                elif grid[current_row][col] not in ['U', 'X']:
+                    # U나 X가 아닌 다른 태그를 만나면 직전 위치가 origin
+                    origin = (current_row + 1, col)
+                    break
+                current_row -= 1
+            else:  # while 문이 break 없이 끝난 경우
+                origin = (0, col)
             origin_cells[(row, col)] = origin
             return origin
         
@@ -343,36 +380,23 @@ def construct_table_html_pred(
         current_span[0] = max(current_span[0], row - origin_row + 1)
         current_span[1] = max(current_span[1], col - origin_col + 1)
 
-    # 6. pointer_logits와 empty_pointer_logits를 사용하여 text_cells 매핑 생성
+    # 6. pointer_logits를 사용하여 text_cells 매핑 생성
     text_cells = {}  # (row, col) -> List[(box_idx, text, prob)]
-    empty_cells = set()  # empty로 판단된 셀들의 (row, col) 집합
-    
     pointer_probs = torch.softmax(pointer_logits, dim=1)
-    empty_probs = torch.sigmoid(empty_pointer_logits) if empty_pointer_logits is not None else None
-
-    # 먼저 empty cell 판단
-    if empty_probs is not None:
-        for token_idx, empty_prob in enumerate(empty_probs):
-            max_empty_prob = empty_prob.max()
-            if max_empty_prob.item() >= confidence_threshold:
-                if token_idx in token_positions:
-                    row, col = token_positions[token_idx]
-                    if row != -1:  # NL 태그가 아닌 경우
-                        empty_cells.add((row, col))
-
-    # 그 다음 text pointer 처리 (empty가 아닌 셀에 대해서만)
+    
     for box_idx in range(pointer_probs.size(0)):
         max_prob, cell_idx = pointer_probs[box_idx].max(dim=0)
         if max_prob.item() >= confidence_threshold and cell_idx < len(token_positions):
             token_idx = cell_idx.item()
             if token_idx in token_positions:
                 row, col = token_positions[token_idx]
-                if row != -1 and (row, col) not in empty_cells:  # empty cell이 아닌 경우에만
+                if row != -1:  # NL 태그가 아닌 경우
                     if box_idx in bbox_with_text:
                         text = bbox_with_text[box_idx]['text']
                         if (row, col) not in text_cells:
                             text_cells[(row, col)] = []
                         text_cells[(row, col)].append((box_idx, text, max_prob.item()))
+
 
     # 7. HTML 테이블 생성
     html = ["<table>"]
@@ -395,11 +419,12 @@ def construct_table_html_pred(
                 
                 cell_tag += ">"
                 
-                if (i, j) in empty_cells:
-                    html.append(f"{cell_tag}(empty)</td>")
-                elif (i, j) in text_cells:
+                if (i, j) in text_cells:
+                    # 해당 셀의 모든 box 처리
                     boxes = text_cells[(i, j)]
+                    # 확률 순으로 정렬
                     boxes.sort(key=lambda x: x[2], reverse=True)
+                    # 모든 텍스트 결합 (공백으로 구분)
                     combined_text = ' '.join(text for _, text, _ in boxes)
                     html.append(f"{cell_tag}{combined_text}</td>")
                 else:
@@ -486,6 +511,100 @@ def extract_spans_from_otsl(otsl_tokens: List[int], tokenizer: OTSLTokenizer) ->
                     
     return row_span_matrix, col_span_matrix
 
+
+def extract_spans_from_html(html_structure: Dict) -> Tuple[np.ndarray, np.ndarray]:
+    """HTML 구조에서 span 정보 추출"""
+    # print(html_structure)
+    tokens = html_structure['structure']['tokens']  # structure 키 안의 tokens에 접근
+    
+    # 1. 그리드 크기 계산
+    num_rows = 0
+    num_cols = 0
+    max_cols = 0
+    
+    i = 0
+    in_first_row = False
+    while i < len(tokens):
+        token = tokens[i]
+        if token == '<tr>':
+            num_rows += 1
+            current_cols = 0
+            in_first_row = (num_rows == 1)
+        elif (token == '<td' or token == '<td>') and in_first_row:
+            colspan = 1
+            if token == '<td':
+                i += 1
+                while i < len(tokens) and tokens[i] != '>':
+                    if 'colspan="' in tokens[i]:
+                        colspan = int(tokens[i].split('"')[1])
+                    i += 1
+            current_cols += colspan
+            max_cols = max(max_cols, current_cols)
+        elif token == '</tr>' and in_first_row:
+            num_cols = max_cols
+            in_first_row = False
+        i += 1
+    
+    # 2. Span 행렬 초기화 - 기본값 1로 설정
+    row_span_matrix = np.ones((num_rows, num_cols))
+    col_span_matrix = np.ones((num_rows, num_cols))
+    
+    # 3. 각 방향별로 span 정보 추출
+    current_row = -1
+    current_col = 0
+    i = 0
+    
+    # Row span 처리
+    while i < len(tokens):
+        token = tokens[i]
+        if token == '<tr>':
+            current_row += 1
+            current_col = 0
+        elif token == '<td' or token == '<td>':
+            rowspan = 1
+            if token == '<td':
+                i += 1
+                while i < len(tokens) and tokens[i] != '>':
+                    if 'rowspan="' in tokens[i]:
+                        rowspan = int(tokens[i].split('"')[1])
+                    i += 1
+            
+            # 현재 위치에서 rowspan 적용
+            if current_col < num_cols:
+                for r in range(current_row, min(current_row + rowspan, num_rows)):
+                    row_span_matrix[r, current_col] = rowspan
+                current_col += 1
+        i += 1
+    
+    # Column span 처리
+    current_row = -1
+    current_col = 0
+    i = 0
+    
+    while i < len(tokens):
+        token = tokens[i]
+        if token == '<tr>':
+            current_row += 1
+            current_col = 0
+        elif token == '<td' or token == '<td>':
+            colspan = 1
+            if token == '<td':
+                i += 1
+                while i < len(tokens) and tokens[i] != '>':
+                    if 'colspan="' in tokens[i]:
+                        colspan = int(tokens[i].split('"')[1])
+                    i += 1
+            
+            # 현재 위치에서 colspan 적용
+            if current_col < num_cols:
+                for c in range(current_col, min(current_col + colspan, num_cols)):
+                    col_span_matrix[current_row, c] = colspan
+                current_col += colspan
+        i += 1
+    
+    return row_span_matrix, col_span_matrix
+
+
 def compute_span_coefficients(row_span_matrix: np.ndarray, col_span_matrix: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     rows, cols = row_span_matrix.shape
     real_cols = cols - 1  # NL 태그 제외
@@ -548,14 +667,16 @@ def pad_coef_matrix(coef: np.ndarray, target_size: int) -> torch.Tensor:
 def get_coef_matrix(
     otsl_tokens: torch.Tensor,  
     tokenizer: OTSLTokenizer,
-    target_size: int,
+    html_structure: Optional[Dict] = None,
+    target_size: int = 100,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     B = otsl_tokens.size(0)
     row_coefs, col_coefs = [], []
 
     for b in range(B):
         tokens = otsl_tokens[b].tolist()
-        row_span_matrix, col_span_matrix = extract_spans_from_otsl(tokens, tokenizer)
+        # row_span_matrix, col_span_matrix = extract_spans_from_otsl(tokens, tokenizer)
+        row_span_matrix, col_span_matrix = extract_spans_from_html(html_structure[b])
         
         row_coefs.append(
             pad_coef_matrix(

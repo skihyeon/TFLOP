@@ -165,6 +165,7 @@ class TFLOP(nn.Module):
         row_span_coef, col_span_coef = get_coef_matrix(
             labels,
             self.tokenizer, 
+            batch['html'],
             self.layout_prompt_length,
         )
         

@@ -4,6 +4,7 @@ import torch
 import pytorch_lightning as pl
 import torchmetrics
 from torch.optim import lr_scheduler
+import gc
 
 from .tflop import TFLOP
 from .losses import TFLOPLoss
@@ -56,10 +57,6 @@ class TFLOPLightningModule(pl.LightningModule):
             self.log(f"train/step_{name.replace('_loss', '')}", value,
                     on_step=True, on_epoch=False, prog_bar=True)
         
-        # 메모리 정리
-        del outputs
-        torch.cuda.empty_cache()
-        
         batch_size = batch['images'].size(0)
         
         # Loss logging
@@ -79,8 +76,9 @@ class TFLOPLightningModule(pl.LightningModule):
         
     @torch.no_grad()
     def validation_step(self, batch, batch_idx):
-        if batch_idx % 1000 == 0:  # 메모리 주기적 정리
+        if batch_idx % 1000 == 0:  # 주기적 메모리 정리
             torch.cuda.empty_cache()
+            gc.collect()  # CPU 메모리 정리 추가
             
         with torch.cuda.amp.autocast(enabled=True):
             outputs = self(batch)
@@ -137,10 +135,6 @@ class TFLOPLightningModule(pl.LightningModule):
                     
             except Exception as e:
                 print(f"Error computing TEDS for sample {i}: {str(e)}")
-        
-        # 메모리 정리
-        del outputs
-        torch.cuda.empty_cache()
         
         return {**loss_dict, **visualization_outputs}
 
@@ -327,6 +321,7 @@ class TFLOPLightningModule(pl.LightningModule):
     def on_train_epoch_end(self):
         # 에폭 종료시 메모리 정리
         torch.cuda.empty_cache()
+        gc.collect()  # CPU 메모리 정리 추가
         
     def on_validation_epoch_end(self):
         # 전체 validation epoch의 평균 TEDS 계산
@@ -355,3 +350,4 @@ class TFLOPLightningModule(pl.LightningModule):
         
         # 메모리 정리
         torch.cuda.empty_cache()
+        gc.collect()  # CPU 메모리 정리 추가

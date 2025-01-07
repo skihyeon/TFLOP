@@ -6,7 +6,6 @@ from PIL import Image
 from torch.utils.data import Dataset
 from models.otsl_tokenizer import OTSLTokenizer
 from typing import Dict, Optional, Any
-import jsonlines
 from utils.util import convert_html_to_otsl
 from transformers import AutoImageProcessor
 from config import ModelConfig
@@ -96,7 +95,6 @@ class TableDataset(BaseTableDataset):
         filtered_count = 0
         token_counts = Counter()
         
-        # 메모리 매핑으로 파일 열기
         with open(ann_file, 'rb') as f:
             mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
             
@@ -111,7 +109,10 @@ class TableDataset(BaseTableDataset):
                 try:
                     ann = json.loads(line.decode('utf-8'))
                     otsl_tokens_list, has_data_flags_list = convert_html_to_otsl(ann)
-                    if otsl_tokens_list is None:
+                    
+                    # OTSL 시퀀스 유효성 검사
+                    if (otsl_tokens_list is None or 
+                        not self.tokenizer.validate_syntax(otsl_tokens_list)):  # 추가된 부분
                         filtered_count += 1
                         continue
                     
@@ -136,7 +137,8 @@ class TableDataset(BaseTableDataset):
                     }
                     self.image_names.append(image_name)
                     
-                except Exception:
+                except Exception as e:
+                    # print(f"Error processing annotation: {str(e)}")  # 디버깅용
                     filtered_count += 1
                     continue
             

@@ -7,6 +7,7 @@ from functools import lru_cache
 import re
 from concurrent.futures import ThreadPoolExecutor
 import torch
+import gc
 
 @dataclass(frozen=True)
 class Node:
@@ -14,11 +15,10 @@ class Node:
     tag: str
     text: str = ""
     children: Tuple['Node', ...] = ()
-    _hash: int = None  # 해시 캐싱
-    _size: int = None  # 노드 수 캐싱
+    _hash: int = None
+    _size: int = None
     
     def __post_init__(self):
-        # frozen=True이므로 object.__setattr__ 사용
         if self._hash is None:
             object.__setattr__(self, '_hash', hash((self.tag, self.text, self.children)))
         if self._size is None:
@@ -30,7 +30,7 @@ class Node:
     def __eq__(self, other: 'Node') -> bool:
         if not isinstance(other, Node):
             return False
-        return self._hash == other._hash  # 해시 비교로 최적화
+        return self._hash == other._hash
 
 # 정규식 패턴을 전역으로 한 번만 컴파일
 TD_PATTERN = re.compile(r'>(.*?)</td>')
@@ -57,11 +57,19 @@ def compute_tree_edit_distance(tree1: Node, tree2: Node) -> int:
 
 class TEDSCalculator:
     """TEDS 계산을 위한 최적화된 클래스"""
-    def __init__(self, max_workers: int = 4):
+    def __init__(self, max_workers: int = 4, max_cache_size: int = 10000):
         self._executor = ThreadPoolExecutor(max_workers=max_workers)
         self._cache = {}
         self._tree_cache = {}
+        self._max_cache_size = max_cache_size
         self._struct_pattern = re.compile(r'>([^<]*)</td>')
+    
+    def _check_and_clear_cache(self):
+        """캐시 크기 체크 및 정리"""
+        if len(self._cache) > self._max_cache_size:
+            self._cache.clear()
+            self._tree_cache.clear()
+            gc.collect()  # 메모리 정리
     
     def _get_cached_tree(self, html: str) -> Optional[Node]:
         """HTML to Tree 변환 결과 캐싱"""
@@ -77,8 +85,10 @@ class TEDSCalculator:
     
     def compute_batch_teds(self, pred_htmls: List[str], true_htmls: List[str]) -> List[float]:
         """배치 단위 TEDS 계산 (병렬 처리)"""
+        self._check_and_clear_cache()  # 캐시 크기 체크
+        
         futures = []
-        results = [0.0] * len(pred_htmls)  # 미리 결과 리스트 할당
+        results = [0.0] * len(pred_htmls)
         
         # 캐시 확인 및 미스된 항목만 계산
         for i, (pred, true) in enumerate(zip(pred_htmls, true_htmls)):
@@ -103,6 +113,12 @@ class TEDSCalculator:
     def _count_nodes(node: Node) -> int:
         """노드 수 계산 (캐시 사용)"""
         return 1 + sum(TEDSCalculator._count_nodes(child) for child in node.children)
+    
+    def __del__(self):
+        """소멸자에서 캐시 정리"""
+        self._cache.clear()
+        self._tree_cache.clear()
+        self._executor.shutdown(wait=False)
 
 def html_to_tree(html: str) -> Optional[Node]:
     """최적화된 HTML 파싱"""
