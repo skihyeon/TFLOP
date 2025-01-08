@@ -29,12 +29,12 @@ class ModelConfig:
 @dataclass
 class TrainingConfig:
     """학습 관련 설정"""
-    exp_name: str = "TFLOP_spanfromhtml"
+    exp_name: str = "TFLOP_mappingModified"
     use_wandb: bool = True
     
     # Resume training
     resume_training: bool = True
-    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20250103_1823_TFLOP_len200_bf16/checkpoints/TFLOP_len200_bf16_epoch=14.ckpt"
+    resume_checkpoint_path: Optional[str] = "/mnt/hdd1/sgh/TFLOP/src/checkpoints/20250103_1823_TFLOP_len200_bf16/checkpoints/TFLOP_len200_bf16_epoch=17.ckpt"
     
     # Data
     data_dir: str = "./data/pubtabnet"
@@ -46,7 +46,7 @@ class TrainingConfig:
     checkpoint_dir: str = "./checkpoints"
     batch_size: int = 4
     accumulate_grad_batches: int = 4
-    learning_rate: float = 1e-4
+    learning_rate: float = 1e-5
     
     # Hardware
     gpu_id: int = 3
@@ -62,7 +62,7 @@ class TrainingConfig:
     precision: str = "bf16-mixed"
     gradient_clip_val: float = 0.5
     num_sanity_val_steps: int = 2
-    check_val_every_n_epoch: int = 5
+    check_val_every_n_epoch: int = 2
     
     def __post_init__(self):
         if self.devices is None:

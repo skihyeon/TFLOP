@@ -28,13 +28,97 @@ def init_wandb(model_config, train_config):
         print(f"Warning: Failed to initialize wandb: {e}")
         return None
 
+## 제대로 동작 안함.
+# def validate_html_table_structure(html_tokens: List[str]) -> bool:
+#     """HTML 테이블 구조의 유효성을 검증
+    
+#     Args:
+#         html_tokens: HTML 토큰 리스트
+#     Returns:
+#         bool: 유효한 테이블 구조인지 여부
+#     """
+#     rows = []
+#     cell_spans = {}  # (row, col) -> (rowspan, colspan)
+#     current_row_idx = -1
+#     current_col_idx = 0
+    
+#     i = 0
+#     while i < len(html_tokens):
+#         token = html_tokens[i]
+        
+#         if token == '<tr>':
+#             if current_row_idx >= 0:  # 이전 행의 열 수를 저장
+#                 rows.append(current_col_idx)
+#             current_row_idx += 1
+#             current_col_idx = 0
+            
+#         elif token == '<td' or token == '<td>':
+#             rowspan = 1
+#             colspan = 1
+            
+#             # span 속성 파싱
+#             if token == '<td':
+#                 j = i + 1
+#                 while j < len(html_tokens) and html_tokens[j] != '>':
+#                     if 'rowspan=' in html_tokens[j]:
+#                         rowspan = int(html_tokens[j].split('"')[1])
+#                     elif 'colspan=' in html_tokens[j]:
+#                         colspan = int(html_tokens[j].split('"')[1])
+#                     j += 1
+#                 i = j
+            
+#             # span이 있는 경우만 span 정보 저장
+#             if rowspan > 1 or colspan > 1:
+#                 # 현재 위치가 이전 span의 영향을 받는지 확인
+#                 while any((r, current_col_idx) in cell_spans 
+#                          for r in range(max(0, current_row_idx - 10), current_row_idx)):
+#                     current_col_idx += 1
+                
+#                 # span 정보 저장
+#                 for r in range(current_row_idx, current_row_idx + rowspan):
+#                     for c in range(current_col_idx, current_col_idx + colspan):
+#                         if (r, c) in cell_spans:  # span 충돌 검사
+#                             return False
+#                         cell_spans[(r, c)] = (rowspan, colspan)
+            
+#             current_col_idx += colspan
+            
+#         i += 1
+    
+#     # 마지막 행의 열 수도 저장
+#     if current_row_idx >= 0:
+#         rows.append(current_col_idx)
+    
+#     if not rows:
+#         return False
+    
+#     # 모든 행의 길이가 같은지 확인
+#     expected_length = rows[0]
+#     if not all(length == expected_length for length in rows):
+#         return False
+    
+#     # span이 있는 경우만 추가 검증
+#     if cell_spans:
+#         # rowspan이 테이블 범위를 벗어나지 않는지 확인
+#         max_row = max(r for r, _ in cell_spans.keys())
+#         if any(r + span[0] > max_row + 1 for (r, _), span in cell_spans.items()):
+#             return False
+    
+#     return True
 
 def convert_html_to_otsl(ann: Dict) -> Tuple[List[str], List[bool]]:
-    if 'html' not in ann or 'structure' not in ann['html'] or 'cells' not in ann['html']:
+    if 'html' not in ann or 'structure' not in ann['html']:
         print(f"Error: Missing required HTML structure")
         return None, []
-        
+    
     html_tokens = ann['html']['structure']['tokens']
+    
+    # # HTML 테이블 구조 검증 추가
+    # if not validate_html_table_structure(html_tokens):
+    #     # print(f"Error: Invalid HTML table structure")
+    #     print(''.join(tag for tag in html_tokens))
+    #     return None, []
+    
     cells = ann['html']['cells']
     
     # cells의 데이터 존재 여부 미리 계산
@@ -45,14 +129,14 @@ def convert_html_to_otsl(ann: Dict) -> Tuple[List[str], List[bool]]:
     num_cols = 0
     current_row = -1
     current_col = 0
-    max_colspan = 0  # colspan 최대값 추적
+    row_cols = []
     
     for i, token in enumerate(html_tokens):
         if token == '<tr>':
+            if current_row >= 0:  # 이전 행의 열 수를 저장
+                row_cols.append(current_col)
             current_row += 1
             current_col = 0
-        elif token == '</tr>':
-            num_cols = max(num_cols, current_col)
         elif token == '<td' or token == '<td>':
             colspan = 1
             if token == '<td':
@@ -60,12 +144,15 @@ def convert_html_to_otsl(ann: Dict) -> Tuple[List[str], List[bool]]:
                 while j < len(html_tokens) and html_tokens[j] != '>':
                     if 'colspan=' in html_tokens[j]:
                         colspan = int(html_tokens[j].split('"')[1])
-                        max_colspan = max(max_colspan, colspan)
                     j += 1
             current_col += colspan
     
+    # 마지막 행의 열 수도 추가
+    if current_row >= 0:
+        row_cols.append(current_col)
+    
     # 실제 필요한 열 수 계산
-    num_cols = max(num_cols, current_col + max_colspan)
+    num_cols = max(row_cols) if row_cols else 0
     
     # 2. 그 다음 원래 로직 진행
     current_row = -1
@@ -87,10 +174,7 @@ def convert_html_to_otsl(ann: Dict) -> Tuple[List[str], List[bool]]:
                     start_row, rowspan = active_rowspans[col]
                     if current_row >= start_row + rowspan:
                         del active_rowspans[col]
-            
-        elif token == '</tr>':
-            num_cols = max(num_cols, current_col)
-            
+        
         elif token == '<td' or token == '<td>':
             # 현재 위치가 활성 rowspan 아래에 있는지 확인
             while current_col in active_rowspans:

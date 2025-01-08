@@ -88,7 +88,7 @@ class TableDataset(BaseTableDataset):
     
     def _load_and_filter_annotations(self):
         """주석 파일 로드 및 sequence length 기준으로 필터링"""
-        ann_file = os.path.join(self.data_dir, f'{self.split}_filtered.jsonl')
+        ann_file = os.path.join(self.data_dir, f'{self.split}.jsonl')
         
         self.annotations = {}
         self.image_names = []
@@ -112,7 +112,7 @@ class TableDataset(BaseTableDataset):
                     
                     # OTSL 시퀀스 유효성 검사
                     if (otsl_tokens_list is None or 
-                        not self.tokenizer.validate_syntax(otsl_tokens_list)):  # 추가된 부분
+                        not self.tokenizer.validate_syntax(otsl_tokens_list)):
                         filtered_count += 1
                         continue
                     
@@ -122,6 +122,12 @@ class TableDataset(BaseTableDataset):
                     
                     if (num_boxes > self.layout_prompt_length or
                         otsl_length > self.config.otsl_max_length - 1):
+                        filtered_count += 1
+                        continue
+                    
+                    # C 토큰과 HTML cells 핑 검증
+                    token_positions = [j for j, token in enumerate(otsl_tokens_list) if token == 'C']
+                    if len(token_positions) != len(ann['html']['cells']):
                         filtered_count += 1
                         continue
                     
@@ -138,14 +144,13 @@ class TableDataset(BaseTableDataset):
                     self.image_names.append(image_name)
                     
                 except Exception as e:
-                    # print(f"Error processing annotation: {str(e)}")  # 디버깅용
                     filtered_count += 1
+                    if DEBUG:
+                        print(f"Error processing annotation: {str(e)}")
                     continue
             
-            mm.close()
-        
-        print(f"\nDataset {self.split}:")
-        print(f"Valid samples: {len(self.image_names)}")
+        print(f"\n=== Dataset Loading Summary ===")
+        print(f"Total loaded: {len(self.image_names)}")
         print(f"Filtered: {filtered_count}")
         
         # 토큰 분포 출력
@@ -154,140 +159,59 @@ class TableDataset(BaseTableDataset):
         for token, count in token_counts.items():
             print(f"  {token:<7}: {count:>4}")
     
-    def _create_box_tag_mappings(self, bboxes, cells, otsl_tokens_list):
-        """박스와 태그 간의 매핑을 생성"""
-        # cells의 sequence_pos -> cell_idx 매핑 생성 (bbox가 있는 셀만)
-        seq_pos_to_cell_idx = {
-            cell['sequence_pos']: cell['cell_idx'] 
-            for cell in cells 
-            if 'bbox' in cell
-        }
-        
-        # bbox가 있는 셀에 대해서만 매핑 생성
-        current_mappings = {
-            cell['cell_idx']: [] 
-            for cell in cells 
-            if 'bbox' in cell
-        }
-        
-        token_to_cell_idx = {}
-        current_cell_idx = 0
-        current_row_start_idx = 0
-        prev_row_start_idx = 0
-        
-        # OTSL 시퀀스 처리 - span 태그 포함
-        for i, token in enumerate(otsl_tokens_list):
-            if token == 'C':
-                # 현재 position이 실제 cell과 매핑되는지 확인
-                if i in seq_pos_to_cell_idx:
-                    token_to_cell_idx[i] = seq_pos_to_cell_idx[i]
-                current_cell_idx += 1
-            elif token == 'L':
-                if current_cell_idx > current_row_start_idx:
-                    token_to_cell_idx[i] = current_cell_idx - 1
-            elif token == 'U':
-                cells_in_prev_row = current_row_start_idx - prev_row_start_idx
-                relative_pos = (current_cell_idx - current_row_start_idx)
-                if cells_in_prev_row > relative_pos:
-                    mapped_cell = prev_row_start_idx + relative_pos
-                    token_to_cell_idx[i] = mapped_cell
-            elif token == 'X':
-                if current_cell_idx > current_row_start_idx:
-                    left_cell_idx = current_cell_idx - 1
-                    cells_in_prev_row = current_row_start_idx - prev_row_start_idx
-                    relative_pos = (current_cell_idx - current_row_start_idx)
-                    if cells_in_prev_row > relative_pos:
-                        up_cell_idx = prev_row_start_idx + relative_pos
-                        mapped_cell = min(left_cell_idx, up_cell_idx)
-                        token_to_cell_idx[i] = mapped_cell
-            elif token == 'NL':
-                prev_row_start_idx = current_row_start_idx
-                current_row_start_idx = current_cell_idx
-        
-        for bbox_idx, bbox in enumerate(bboxes):
-            mapped = False
-            best_overlap = 0
-            best_cell_idx = None
-            
-            for cell in cells:
-                if 'bbox' not in cell:  # bbox가 없는 빈 셀은 건너뛰기
-                    continue
-
-                overlap_ratio = self.compute_overlap_ratio(bbox, cell['bbox'])
-                if overlap_ratio > best_overlap:
-                    best_overlap = overlap_ratio
-                    best_cell_idx = cell['cell_idx']
-                    mapped_cell_idx = token_to_cell_idx.get(cell['sequence_pos'], -1)
-                    if 0 <= mapped_cell_idx < len(cells):
-                        mapped = True
-            
-            if mapped and best_overlap > 0.5:
-                current_mappings[best_cell_idx].append(bbox_idx)
-        
-        return current_mappings
-
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         image_name = self.image_names[idx]
         ann = self.annotations[image_name]
         
         # 이미지 로드 및 전처리
         image_path = os.path.join(self.data_dir, self.split, image_name)
-        if not os.path.exists(image_path):
-            raise ValueError(f"Image file not found: {image_path}")
-        
         image = Image.open(image_path).convert('RGB')
         image_width, image_height = image.size
         image = self.image_processor(image, return_tensors="pt")
         
-        # C 태그 위치 추적
-        token_positions = [j for j, token in enumerate(ann['otsl_tokens_list']) if token == 'C']
-        
-        # cells, bboxes, text 정보 한번에 처리
+        # C 태그 위치 추적 및 데이터 처리
         cells = []
         bboxes = []
         bbox_with_text = {}
-        cell_idx = 0
+        current_mappings = {}  # cell_idx -> bbox_idx list 매핑
+
+        # C 토큰 위치 가져오기
+        token_positions = [j for j, token in enumerate(ann['otsl_tokens_list']) if token == 'C']
         
-        for pos in token_positions:
-            if cell_idx >= len(ann['html']['cells']):
-                break
-                
-            cell = ann['html']['cells'][cell_idx]
-            cell_info = {'sequence_pos': pos, 'cell_idx': cell_idx}
+        # cells, bboxes, text 정보 �리
+        for cell_idx, (pos, cell) in enumerate(zip(token_positions, ann['html']['cells'])):
+            cell_info = {
+                'sequence_pos': pos,
+                'cell_idx': cell_idx,
+                'has_data': False
+            }
             
             if 'bbox' in cell:
+                # bbox 정규화
                 x0, y0, x1, y1 = cell['bbox']
-                normalized_bbox = [x0/image_width, y0/image_height, 
-                                x1/image_width, y1/image_height]
+                normalized_bbox = [
+                    x0/image_width, y0/image_height,
+                    x1/image_width, y1/image_height
+                ]
+                
+                # cell 정보 업데이트
                 cell_info.update({
                     'bbox': normalized_bbox,
                     'has_data': True
                 })
                 bboxes.append(normalized_bbox)
                 
+                # bbox 매핑 생성
+                current_mappings[cell_idx] = [len(bboxes) - 1]
+                
+                # text 정보 저장
                 tokens = cell.get('tokens', [])
                 bbox_with_text[cell_idx] = {
                     'bbox': cell['bbox'],
                     'text': self.tokens_to_text(tokens) if tokens else ""
                 }
-            else:
-                cell_info['has_data'] = False
             
             cells.append(cell_info)
-            cell_idx += 1
-        
-        if not cells:
-            raise ValueError(f"No valid cells found in {image_name}")
-        
-        # box-tag 매핑 생성 및 보정
-        current_mappings = self._create_box_tag_mappings(bboxes, cells, ann['otsl_tokens_list'])
-        unmapped_boxes = set(range(len(bboxes))) - {idx for mappings in current_mappings.values() for idx in mappings}
-        
-        if unmapped_boxes:
-            default_cell = next(cell for cell in cells if 'bbox' in cell)
-            for bbox_idx in unmapped_boxes:
-                current_mappings[default_cell['cell_idx']].append(bbox_idx)
-                print(f"Warning: Sample {idx}, Box {bbox_idx} mapped to default cell {default_cell['cell_idx']}")
         
         return {
             'image_name': image_name,
@@ -298,7 +222,6 @@ class TableDataset(BaseTableDataset):
             'cells': cells,
             'html': ann['html'],
             'box_mappings': current_mappings,
-            'token_positions': token_positions,
             'bbox_with_text': bbox_with_text
         }
 

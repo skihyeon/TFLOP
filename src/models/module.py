@@ -170,8 +170,8 @@ class TFLOPLightningModule(pl.LightningModule):
         
         scheduler = lr_scheduler.CosineAnnealingWarmRestarts(
             optimizer,
-            T_0=25000,
-            T_mult=2, 
+            T_0=800000,
+            T_mult=1, 
             eta_min=1e-10
         )
         

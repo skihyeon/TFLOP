@@ -41,15 +41,15 @@ def collate_fn(batch, tokenizer, model_config):
         for i, sample in enumerate(batch)
     }
     
-    # box_indices 채우기
+    # box_indices 채우기 수정
     for i, sample in enumerate(batch):
         for cell_idx, bbox_indices in sample['box_mappings'].items():
-            if cell_idx < layout_prompt_length:
-                sequence_pos = seq_pos_cache[i].get(cell_idx)
-                if sequence_pos is not None and 0 <= sequence_pos < model_config.otsl_max_length - 1:
-                    adjusted_pos = sequence_pos
-                    for j, bbox_idx in enumerate(bbox_indices[:max_mappings]):
-                        box_indices[i, bbox_idx, j] = adjusted_pos
+            sequence_pos = seq_pos_cache[i].get(cell_idx)
+            if sequence_pos is not None and 0 <= sequence_pos < model_config.otsl_max_length - 1:
+                # bbox_indices는 이제 리스트이므로 직접 순회
+                for j, bbox_idx in enumerate(bbox_indices):
+                    if j < max_mappings:  # 최대 매핑 수 제한
+                        box_indices[i, bbox_idx, j] = sequence_pos
     
     # 5. 마스크 처리
     total_length = layout_prompt_length + model_config.otsl_max_length  # 전체 길이 (BOS, EOS 포함)
